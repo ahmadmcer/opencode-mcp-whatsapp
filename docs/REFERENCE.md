@@ -85,6 +85,19 @@ capped at 200 messages, `chatMap` at 200 chats (LRU-evicted).
 - **Logging.** Baileys `warn`/`error`/`fatal` go to **stderr** (never stdout,
   which is the MCP JSON-RPC channel); `info`/`debug` are silenced.
 
+## Keeping the session out of git
+
+The linked WhatsApp session is written to `<config-dir>/whatsapp/` — a sibling of
+`mcp-whatsapp/`. Those files authenticate the account, so committing them is an
+account-takeover risk. Two things guard against it:
+
+- `mcp-whatsapp/.gitignore` (shipped with the server) ignores its own
+  `node_modules/` and `*.bak`.
+- The installer idempotently adds `whatsapp/` and `*.bak` to
+  `<config-dir>/.gitignore` (creating it if absent, appending only missing lines
+  under a labeled section) so a version-controlled config dir never picks up the
+  session or the installer's backups.
+
 ## How the installer edits opencode.jsonc
 
 The existing file is parsed as JSONC (comments and trailing commas tolerated,

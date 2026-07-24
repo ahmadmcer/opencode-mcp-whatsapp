@@ -10,6 +10,7 @@ import { shellExec } from "../src/shellExec.mjs";
 import { defaultTargetDir, resolveTargetDir } from "../src/paths.mjs";
 import { copyFile } from "../src/copyStatic.mjs";
 import { registerWhatsappMcp, buildEnvironment } from "../src/mergeConfig.mjs";
+import { ensureGitignore } from "../src/gitignore.mjs";
 import { runNpmInstall, verifyConfig, listMcpStatus } from "../src/verify.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -119,6 +120,11 @@ async function main() {
   written.push(reg.configPath);
   if (reg.backup) backedUp.push(reg.backup);
 
+  // --- keep the account session out of git if the config dir is version-controlled ---
+  // The session lives at <target>/whatsapp/ (sibling of mcp-whatsapp) and
+  // authenticates the account, so it must never be committed.
+  const gi = ensureGitignore(targetDir, ["whatsapp/", "*.bak"]);
+
   // --- npm install (Baileys etc.) ---
   runNpmInstall(mcpDir);
 
@@ -146,6 +152,9 @@ async function main() {
   if (reg.hadComments) {
     console.log("Your opencode.jsonc had comments -- they were preserved in the .bak, but the");
     console.log("rewritten file is plain JSON (still valid JSONC). Re-add comments if you want them.");
+  }
+  if (gi.added.length) {
+    console.log(`\n${gi.created ? "Created" : "Updated"} ${gi.file} to ignore your WhatsApp session: ${gi.added.join(", ")}.`);
   }
 
   // --- linking instructions ---
