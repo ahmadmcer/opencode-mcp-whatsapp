@@ -2,8 +2,9 @@
 
 An interactive installer that adds a **local WhatsApp MCP server** to your
 [OpenCode](https://opencode.ai) setup. Once linked, your agent can send and
-receive WhatsApp messages, send files, and list recent chats — through five
-tools exposed over the Model Context Protocol.
+receive WhatsApp messages, react/reply/edit/delete, send files, locations,
+contacts and polls, download media, and inspect groups — through a set of tools
+exposed over the Model Context Protocol.
 
 It's built on [Baileys](https://github.com/WhiskeySockets/Baileys) (an
 unofficial WhatsApp Web library) and runs entirely on your machine.
@@ -42,37 +43,72 @@ for a post-install sanity check) but not required to install.
   }
   ```
 
-## The five tools
+## The tools
+
+Tool names mirror the underlying Baileys calls (snake_cased). Tools marked
+**gated** enforce the recipient allowlist and the send rate limit.
+
+**Messaging**
 
 | Tool | What it does |
 |---|---|
-| `send` | Send a text message to a number or JID. |
-| `send_file` | Send a local file (image / video / document) from an allowed directory. |
-| `status` | Connection state, your JID, QR path, active policy (send roots, allowlist, rate limit). |
-| `recent_messages` | Recent inbound messages seen since the server connected (in-memory). |
-| `list_chats` | Chats seen since the server connected. |
+| `send_message` | Send a text message to a number or JID. Optional `quoted_message_id` replies to a prior message. **(gated)** |
+| `send_media` | Send a local file (image / video / document) from an allowed directory. Optional `quoted_message_id`. **(gated)** |
+| `send_reaction` | React to a message with an emoji (empty emoji removes it). **(gated)** |
+| `edit_message` | Edit the text of a message you sent. **(gated)** |
+| `delete_message` | Delete/revoke a message (revoke-for-everyone only for your own). **(gated)** |
+| `send_location` | Send a location pin (latitude/longitude, optional name/address). **(gated)** |
+| `send_contact` | Send a contact as a vCard. **(gated)** |
+| `send_poll` | Send a poll (2–12 options). **(gated)** |
+
+**Chat state & media**
+
+| Tool | What it does |
+|---|---|
+| `read_messages` | Mark a received message as read (sends a read receipt). |
+| `send_presence_update` | Send typing/recording/online/offline presence to a chat. |
+| `download_media_message` | Download a received message's media to an allowed directory (write-sandboxed). |
+
+**Discovery**
+
+| Tool | What it does |
+|---|---|
+| `group_fetch_all_participating` | List the groups this account is in. |
+| `group_metadata` | A group's subject, description, owner, and participants. |
+| `profile_picture_url` | Profile-picture URL for a contact or group. |
+| `connection_state` | Connection state, your JID, QR path, active policy (send roots, allowlist, rate limit). |
+| `messages_upsert` | Recent inbound messages seen since the server connected (in-memory), each with an id other tools reference. |
+| `chats` | Chats seen since the server connected. |
+
+Message-action tools (`send_reaction`, `edit_message`, `delete_message`,
+`read_messages`, `download_media_message`) take a `message_id` from
+`messages_upsert` — only messages seen since the server connected can be
+referenced.
 
 ## Linking your phone (one time)
 
 1. Start (or restart) `opencode` so the server connects.
 2. It writes a QR image to `~/.config/opencode/whatsapp/qr.png`.
 3. Open that PNG and scan it in **WhatsApp → Settings → Linked Devices → Link a device**.
-4. Ask the agent to run `status` — it should report `Connected: yes`.
+4. Ask the agent to run `connection_state` — it should report `Connected: yes`.
 
 The session is cached, so you only scan once. Reconnects are automatic.
 
 ## Safety model
 
-This server is designed to be driven by an LLM, so the two write-capable tools
-are gated:
+This server is designed to be driven by an LLM, so the write-capable tools are
+gated:
 
-- **`send_file` is sandboxed.** It only reads files under `WHATSAPP_SEND_ROOT`
-  (default: `~/Downloads` and `~/.config/opencode/whatsapp-outbox`) and refuses
-  to read the auth directory. It is *not* an arbitrary-file-read tool.
+- **File access is sandboxed.** `send_file`/`send_media` only reads, and
+  `download_media_message` only writes, files under `WHATSAPP_SEND_ROOT`
+  (default: `~/Downloads` and `~/.config/opencode/whatsapp-outbox`); both refuse
+  the auth directory. It is *not* an arbitrary-file-read/write tool.
 - **Recipient allowlist.** Optionally restrict who can be messaged
   (`WHATSAPP_ALLOWED_RECIPIENTS`). Unset means no restriction.
 - **Send rate limit.** At most `WHATSAPP_SEND_MAX` sends per
-  `WHATSAPP_SEND_WINDOW_MS` (default 10 / 60s), shared by `send` and `send_file`.
+  `WHATSAPP_SEND_WINDOW_MS` (default 10 / 60s), shared by every message-producing
+  tool (`send_message`, `send_media`, `send_reaction`, `edit_message`,
+  `delete_message`, `send_location`, `send_contact`, `send_poll`).
 
 All three are configurable during install and afterward via the `environment`
 block. Full detail: [`docs/REFERENCE.md`](docs/REFERENCE.md).

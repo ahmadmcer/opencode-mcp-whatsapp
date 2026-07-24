@@ -79,7 +79,7 @@ async function main() {
 
   // --- send roots (optional) ---
   const sep = process.platform === "win32" ? ";" : ":";
-  console.log("\n`send_file` may only read from these directories (sandbox against exfiltration).");
+  console.log("\n`send_media` reads and `download_media_message` writes only within these directories (sandbox against exfiltration).");
   console.log(`Default: ~/Downloads and ~/.config/opencode/whatsapp-outbox. To override, give an`);
   console.log(`OS-path-separated list (separator on this OS is "${sep}"). Leave blank for the default.`);
   answers.sendRoot = (await promptText(prompter, "Send roots")) || null;
@@ -162,8 +162,12 @@ async function main() {
   console.log("1. Start (or restart) opencode so the whatsapp server connects.");
   console.log(`2. It writes a QR image to: ${path.join(targetDir, "whatsapp", "qr.png")}`);
   console.log("3. Open that PNG and scan it in WhatsApp > Settings > Linked Devices > Link a device.");
-  console.log("4. Ask the agent to run the `status` tool -- it should report Connected: yes.");
-  console.log("\nTools available to the agent: send, send_file, status, recent_messages, list_chats.");
+  console.log("4. Ask the agent to run the `connection_state` tool -- it should report Connected: yes.");
+  console.log(
+    "\nTools available to the agent: send_message, send_media, send_reaction, edit_message, delete_message,\n" +
+      "read_messages, send_presence_update, send_location, send_contact, send_poll, download_media_message,\n" +
+      "group_fetch_all_participating, group_metadata, profile_picture_url, connection_state, messages_upsert, chats.",
+  );
   console.log("Heads up: this uses an unofficial WhatsApp library; keep send volume low to avoid bans.");
 }
 

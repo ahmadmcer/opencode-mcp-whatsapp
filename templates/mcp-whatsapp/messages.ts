@@ -3,6 +3,17 @@
 // attached to the socket inside store.initConnection(), so it re-binds on every
 // (re)connect — no messages are missed and no listener leaks to a dead socket.
 
+export type MediaType = "image" | "video" | "document" | "audio" | "sticker"
+
+// A minimal shape of the Baileys message key. Kept structural (not imported from
+// baileys) so this module and its tests stay dependency-free.
+export type MsgKey = {
+  remoteJid?: string | null
+  id?: string | null
+  fromMe?: boolean | null
+  participant?: string | null
+}
+
 export type Recent = {
   ts: number
   from: string
@@ -11,40 +22,88 @@ export type Recent = {
   fromMe: boolean
   id: string
   chatJid: string
+  mediaType?: MediaType
+  key: MsgKey
 }
 
 export type ChatEntry = { jid: string; name: string; lastTs: number; lastBody: string }
 
+// A resolved reference to a stored message, used by the message-action tools
+// (react / edit / delete / read / download) to recover the Baileys key and the
+// raw message from an agent-supplied id.
+export type ResolvedMessage = {
+  key: MsgKey
+  raw: any
+  chatJid: string
+  mediaType?: MediaType
+}
+
 const MAX_RECENT = 200
 const MAX_CHATS = 200
+const MAX_RAW = 200
 
 const recent: Recent[] = []
 const chatMap = new Map<string, ChatEntry>()
+// Bounded id -> raw WAMessage map so the action tools can look a message up by id
+// long after it scrolled out of the rendered `recent` list. Insertion-ordered, so
+// the first key is always the oldest — cheap FIFO eviction.
+const rawById = new Map<string, any>()
+
+// Detects a media message with no text body and returns its type + a display
+// placeholder, so images/videos/etc. are no longer dropped for lacking a caption.
+function detectMedia(message: any): { type: MediaType; placeholder: string } | null {
+  if (message.imageMessage) return { type: "image", placeholder: "[image]" }
+  if (message.videoMessage) return { type: "video", placeholder: "[video]" }
+  if (message.documentMessage || message.documentWithCaptionMessage)
+    return { type: "document", placeholder: "[document]" }
+  if (message.audioMessage) return { type: "audio", placeholder: "[audio]" }
+  if (message.stickerMessage) return { type: "sticker", placeholder: "[sticker]" }
+  return null
+}
 
 export function handleUpsert(evt: any) {
   // Only real-time notifications; skip history-sync ("append"/undefined) floods.
   if (evt?.type !== "notify") return
   for (const m of evt?.messages ?? []) {
     if (!m?.message || !m?.key) continue
-    const body =
-      m.message.conversation ||
-      m.message.extendedTextMessage?.text ||
-      m.message.imageMessage?.caption ||
-      m.message.videoMessage?.caption ||
-      m.message.documentMessage?.caption ||
+    // Documents sent with a caption arrive wrapped; unwrap so both the body and
+    // the media detection see the inner message.
+    const inner = m.message.documentWithCaptionMessage?.message ?? m.message
+    const text =
+      inner.conversation ||
+      inner.extendedTextMessage?.text ||
+      inner.imageMessage?.caption ||
+      inner.videoMessage?.caption ||
+      inner.documentMessage?.caption ||
       ""
-    if (!body) continue
+    const media = detectMedia(inner)
+    // Skip only messages that are neither text nor recognized media (receipts,
+    // reactions, protocol messages, ...).
+    if (!text && !media) continue
+    const body = text || media!.placeholder
+
     const from = m.key.remoteJid ?? "unknown"
+    const id = m.key.id ?? ""
     recent.push({
       ts: Number(m.messageTimestamp ?? Math.floor(Date.now() / 1000)),
       from: m.key.participant ?? from,
       fromName: m.pushName,
       body,
       fromMe: m.key.fromMe ?? false,
-      id: m.key.id ?? "",
+      id,
       chatJid: from,
+      mediaType: media?.type,
+      key: m.key,
     })
     if (recent.length > MAX_RECENT) recent.shift()
+
+    if (id) {
+      rawById.set(id, m)
+      if (rawById.size > MAX_RAW) {
+        const oldest = rawById.keys().next().value
+        if (oldest !== undefined) rawById.delete(oldest)
+      }
+    }
 
     const cur = chatMap.get(from) ?? { jid: from, name: m.pushName ?? from, lastTs: 0, lastBody: "" }
     const ts = Number(m.messageTimestamp ?? 0)
@@ -81,4 +140,19 @@ export function getChats(limit: number): ChatEntry[] {
   return Array.from(chatMap.values())
     .sort((a, b) => b.lastTs - a.lastTs)
     .slice(0, limit)
+}
+
+// Resolve an agent-supplied message id to its Baileys key + raw message. Returns
+// null when the id was never seen (or has aged out of the bounded buffer), which
+// the tool layer turns into a "call messages_upsert first" error.
+export function getMessageById(id: string): ResolvedMessage | null {
+  const raw = rawById.get(id)
+  if (!raw) return null
+  const entry = recent.find((r) => r.id === id)
+  return {
+    key: raw.key,
+    raw,
+    chatJid: raw.key?.remoteJid ?? entry?.chatJid ?? "unknown",
+    mediaType: entry?.mediaType,
+  }
 }

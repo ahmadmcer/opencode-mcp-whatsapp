@@ -2,7 +2,7 @@ import test from "node:test"
 import assert from "node:assert/strict"
 import { join } from "node:path"
 import { homedir } from "node:os"
-import { toJid, isAbsolutePath, filenameOf, isInside, resolveWithinRoots } from "./utils.js"
+import { toJid, isAbsolutePath, filenameOf, isInside, resolveWithinRoots, buildVcard } from "./utils.js"
 
 test("toJid normalizes messy phone numbers", () => {
   assert.equal(toJid("+1 (555) 123-4567"), "15551234567@s.whatsapp.net")
@@ -48,4 +48,21 @@ test("resolveWithinRoots rejects paths outside every root (exfil guard)", () => 
   const root = join(homedir(), "Downloads")
   assert.throws(() => resolveWithinRoots([root], join(homedir(), ".ssh", "id_rsa")))
   assert.throws(() => resolveWithinRoots([root], join(root, "..", "..", "etc", "passwd")))
+})
+
+test("buildVcard normalizes the phone and carries a waid", () => {
+  const vcard = buildVcard("Jeff", "+1 (555) 123-4567")
+  assert.match(vcard, /^BEGIN:VCARD\nVERSION:3.0\n/)
+  assert.match(vcard, /FN:Jeff\n/)
+  assert.match(vcard, /TEL;type=CELL;type=VOICE;waid=15551234567:\+15551234567/)
+  assert.match(vcard, /\nEND:VCARD$/)
+})
+
+test("buildVcard escapes structural characters in the display name", () => {
+  const vcard = buildVcard("Doe; Jane, MD", "447700900123")
+  assert.match(vcard, /FN:Doe\\; Jane\\, MD\n/)
+})
+
+test("buildVcard rejects too-short phone numbers", () => {
+  assert.throws(() => buildVcard("X", "123"))
 })

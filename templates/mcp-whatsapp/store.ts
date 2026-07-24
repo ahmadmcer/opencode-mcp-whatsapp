@@ -58,6 +58,12 @@ export function getAuthDir() {
 export function getLastError() {
   return lastError
 }
+// Exposed for downloadMediaMessage, which needs a logger and the socket's own
+// updateMediaMessage (reachable via getSocket().updateMediaMessage) as its
+// reuploadRequest.
+export function getLogger() {
+  return logger
+}
 
 function log(msg: string) {
   console.error(`[whatsapp] ${msg}`)

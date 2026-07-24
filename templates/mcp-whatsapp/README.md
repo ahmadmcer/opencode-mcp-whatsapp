@@ -2,7 +2,11 @@
 
 A local [OpenCode](https://opencode.ai) / MCP server that links a WhatsApp
 account (via [Baileys](https://github.com/WhiskeySockets/Baileys)) and exposes
-five tools: `send`, `send_file`, `status`, `recent_messages`, `list_chats`.
+Baileys-flavored tools: `send_message`, `send_media`, `send_reaction`,
+`edit_message`, `delete_message`, `read_messages`, `send_presence_update`,
+`send_location`, `send_contact`, `send_poll`, `download_media_message`,
+`group_fetch_all_participating`, `group_metadata`, `profile_picture_url`,
+`connection_state`, `messages_upsert`, `chats`.
 
 This folder is installed by
 [`opencode-mcp-whatsapp`](https://github.com/ahmadmcer/opencode-mcp-whatsapp).
@@ -15,7 +19,7 @@ You normally don't run anything here by hand — OpenCode launches it via the
    a QR image to `../whatsapp/qr.png` (i.e. `~/.config/opencode/whatsapp/qr.png`).
 2. Open that PNG and scan it in **WhatsApp → Settings → Linked Devices → Link a
    device**.
-3. Ask the agent to run the `status` tool to confirm `Connected: yes`.
+3. Ask the agent to run the `connection_state` tool to confirm `Connected: yes`.
 
 The session is cached under `~/.config/opencode/whatsapp/`, so you only scan once.
 
@@ -26,7 +30,7 @@ The session is cached under `~/.config/opencode/whatsapp/`, so you only scan onc
 | `WHATSAPP_ALLOWED_RECIPIENTS` | (unset = all) | Comma/`;`/newline list of numbers or JIDs allowed as send targets. |
 | `WHATSAPP_SEND_MAX` | `10` | Max sends per window (rate limit). |
 | `WHATSAPP_SEND_WINDOW_MS` | `60000` | Rate-limit window in ms. |
-| `WHATSAPP_SEND_ROOT` | `~/Downloads` + `~/.config/opencode/whatsapp-outbox` | OS-path-separated list of directories `send_file` may read from. |
+| `WHATSAPP_SEND_ROOT` | `~/Downloads` + `~/.config/opencode/whatsapp-outbox` | OS-path-separated list of directories `send_media` may read from and `download_media_message` may write to. |
 
 Set these in the `environment` block of the `whatsapp` server in your
 `opencode.jsonc`.
@@ -39,8 +43,11 @@ npm test
 
 ## Security notes
 
-- `send_file` is sandboxed to `WHATSAPP_SEND_ROOT` and refuses to read the auth
-  directory — it is not an arbitrary-file-read tool.
+- `send_media` (read) and `download_media_message` (write) are sandboxed to
+  `WHATSAPP_SEND_ROOT` and refuse the auth directory — not arbitrary-file tools.
+- Message-action tools (`send_reaction`, `edit_message`, `delete_message`,
+  `read_messages`, `download_media_message`) reference a `message_id` from
+  `messages_upsert`; only messages seen since connect can be referenced.
 - Outbound sends are gated by an optional recipient allowlist and a rate limit.
 - This uses an unofficial WhatsApp library. Automating WhatsApp can violate its
   Terms of Service and may get the account banned. Use a number you can afford to
