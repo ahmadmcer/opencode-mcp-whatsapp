@@ -6,7 +6,7 @@ Baileys-flavored tools: `send_message`, `send_media`, `send_reaction`,
 `edit_message`, `delete_message`, `read_messages`, `send_presence_update`,
 `send_location`, `send_contact`, `send_poll`, `download_media_message`,
 `group_fetch_all_participating`, `group_metadata`, `profile_picture_url`,
-`login_qr`, `connection_state`, `messages_upsert`, `chats`.
+`login_qr`, `relink`, `connection_state`, `messages_upsert`, `chats`.
 
 This folder is installed by
 [`opencode-mcp-whatsapp`](https://github.com/ahmadmcer/opencode-mcp-whatsapp).
@@ -23,7 +23,9 @@ You normally don't run anything here by hand — OpenCode launches it via the
 
 The session is cached under `~/.config/opencode/whatsapp/`, so you only scan once.
 If a newer OpenCode session takes over the link, older ones step aside rather than
-fighting for it (which used to force a re-scan); restart one to reclaim the link.
+fighting for it (which used to force a re-scan); restart one — or run `relink` — to
+reclaim the link. If WhatsApp reports **Logged out**, run `relink` with `wipe: true`
+then `login_qr` to re-link in place, no OpenCode restart needed.
 
 ## Configuration (environment variables)
 

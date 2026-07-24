@@ -105,6 +105,11 @@ echo our own sends back through `messages.upsert`, so they are recorded on send)
 - **`login_qr`** — no input. Renders the pending linking QR as scannable ASCII in
   the terminal (via `qrcode-terminal`). Returns "already connected" when linked, or
   guidance when no QR is pending yet. The raw QR is also written to `qr.png`.
+- **`relink`** — optional `wipe` (default false). Reconnects the socket in-process,
+  so re-linking never needs an OpenCode restart. `wipe: true` deletes the stored
+  session first (use after a `loggedOut` state or to switch numbers) and a fresh QR
+  follows — show it with `login_qr`. `wipe: false` reconnects with the existing
+  session (reclaim a stepped-aside link, or retry). See Resilience below.
 - **`connection_state`** — no input. Connection state, your JID, auth dir, QR path +
   mtime/size, send roots, allowlist, rate limit, and the last error if any.
 - **`messages_upsert`** / **`chats`** — optional `limit` (1–200, default 30). Both
@@ -119,7 +124,13 @@ echo our own sends back through `messages.upsert`, so they are recorded on send)
 
 - **Reconnection.** On a dropped socket the server reconnects with exponential
   backoff (1s → 30s cap), resetting on a successful open. A `loggedOut` close is
-  terminal — it tells you to delete the auth dir and re-link rather than looping.
+  terminal — reconnecting with dead creds would loop forever — so it stops and
+  points you at the `relink` tool.
+- **Re-linking without a restart (`relink`).** Deleting the auth dir from outside
+  does nothing to a running server: it stopped on logout and holds no live socket
+  to notice. The `relink` tool fixes this in-process — it cancels any pending
+  reconnect, tears down the socket, optionally wipes the session (`wipe: true`), and
+  re-initializes, so a fresh QR appears (via `login_qr`) with no OpenCode restart.
 - **Multiple instances / `connectionReplaced`.** Every `opencode` process starts
   its own server, but WhatsApp permits only one live socket per link. When a newer
   session connects, the older socket receives a `connectionReplaced` (440) close.

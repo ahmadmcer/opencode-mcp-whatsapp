@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync } from "node:fs"
+import { existsSync, mkdirSync, rmSync } from "node:fs"
 import { writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { homedir } from "node:os"
@@ -41,6 +41,7 @@ let lastQr: string | null = null
 let reconnectAttempts = 0
 let reconnecting = false
 let steppedAside = false
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
 export function getSocket(): WASocket | null {
   return sock
@@ -87,7 +88,8 @@ function scheduleReconnect() {
   const delay = Math.min(MAX_BACKOFF_MS, 2 ** reconnectAttempts * 1000)
   reconnectAttempts++
   log(`reconnecting in ${delay}ms (attempt ${reconnectAttempts})`)
-  setTimeout(() => {
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null
     reconnecting = false
     initConnection().catch((e) => {
       lastError = (e as Error).message
@@ -105,6 +107,48 @@ export function startConnection() {
     log(`initial connection failed: ${lastError}`)
     scheduleReconnect()
   })
+}
+
+/**
+ * Reconnect from scratch in-process, so re-linking never needs an OpenCode
+ * restart. Tears down the current socket, cancels any pending reconnect, resets
+ * state, and (when `wipe`) deletes the stored session so Baileys emits a fresh QR.
+ *
+ * - `wipe: false` — reconnect with the existing session (reclaim a stepped-aside
+ *   link, or retry after an error). No QR unless the session is already dead.
+ * - `wipe: true` — delete the session first (use after a "Logged out" state, or to
+ *   link a different number). A fresh QR follows a moment later; show it with login_qr.
+ */
+export async function forceRelink(wipe: boolean): Promise<void> {
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+  reconnecting = false
+  reconnectAttempts = 0
+  if (sock) {
+    try {
+      ;(sock.ev as any).removeAllListeners?.()
+    } catch {}
+    try {
+      ;(sock as any).end?.(undefined)
+    } catch {}
+    sock = null
+  }
+  connected = false
+  meJid = null
+  lastQr = null
+  lastError = null
+  steppedAside = false
+  if (wipe) {
+    try {
+      rmSync(AUTH_DIR, { recursive: true, force: true })
+      log(`wiped session at ${AUTH_DIR}`)
+    } catch (e) {
+      log(`could not wipe ${AUTH_DIR}: ${(e as Error).message}`)
+    }
+  }
+  await initConnection()
 }
 
 export async function initConnection() {
@@ -167,8 +211,10 @@ export async function initConnection() {
       meJid = null
       const code = (lastDisconnect?.error as any)?.output?.statusCode
       if (code === DisconnectReason.loggedOut) {
-        // Terminal: creds are dead. Reconnecting would loop forever.
-        lastError = `Logged out. Delete ${AUTH_DIR} and re-link by scanning a fresh QR.`
+        // Terminal: creds are dead. Reconnecting with them would loop forever —
+        // stop, and let the user re-link in-process via the `relink` tool (which
+        // wipes the session and generates a fresh QR without an OpenCode restart).
+        lastError = "Logged out by WhatsApp. Run the relink tool (wipe: true) to clear the stale session and get a fresh QR — no OpenCode restart needed."
         log(lastError)
         return
       }

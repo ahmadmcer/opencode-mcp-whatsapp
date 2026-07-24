@@ -15,6 +15,7 @@ import {
   getLastError,
   getLogger,
   getLastQr,
+  forceRelink,
 } from "./store.js"
 import { getRecent, getChats, getMessageById, recordOutgoing, type ResolvedMessage } from "./messages.js"
 import { toJid, filenameOf, resolveWithinRoots, isInside, buildVcard } from "./utils.js"
@@ -620,6 +621,31 @@ export function registerTools(server: McpServer) {
     },
   )
 
+  // --- relink -------------------------------------------------------------
+  server.registerTool(
+    "relink",
+    {
+      title: "Re-link WhatsApp",
+      description:
+        "Reconnect the WhatsApp session in-process — no OpenCode restart needed. Set `wipe: true` to delete the stored session first and generate a fresh QR (use this after a 'Logged out' state, or to link a different number); `wipe: false` just reconnects with the existing session (e.g. to reclaim a link a newer session took over). After running with wipe, wait a few seconds and call login_qr.",
+      inputSchema: {
+        wipe: z.boolean().optional(),
+      },
+    },
+    async ({ wipe = false }) => {
+      try {
+        await forceRelink(wipe)
+      } catch (e) {
+        return errText(`Relink failed: ${(e as Error).message}`)
+      }
+      return okText(
+        wipe
+          ? "Session wiped and the connection is restarting. Wait ~3–5 seconds, then run login_qr to scan a fresh code."
+          : "Reconnecting with the existing session. Run connection_state in a few seconds to confirm; if it was logged out, use relink with wipe: true instead.",
+      )
+    },
+  )
+
   // --- login_qr -----------------------------------------------------------
   server.registerTool(
     "login_qr",
@@ -633,11 +659,12 @@ export function registerTools(server: McpServer) {
       if (isConnected()) return okText(`Already connected as ${getMyJid()}. No QR needed.`)
       const qr = getLastQr()
       if (!qr) {
+        const loggedOut = getLastError()?.includes("Logged out")
         const last = getLastError() ? `\nLast error: ${getLastError()}` : ""
-        return okText(
-          `No QR pending right now. The server may still be starting or reconnecting — wait a few seconds and try again. ` +
-            `A QR only appears when WhatsApp wants a fresh link; if you were linked before, it should reconnect on its own.${last}`,
-        )
+        const hint = loggedOut
+          ? "The session is logged out — run the relink tool with wipe: true to clear it and generate a fresh QR."
+          : "The server may still be starting or reconnecting — wait a few seconds and try again. A QR only appears when WhatsApp wants a fresh link; if you were linked before, it should reconnect on its own."
+        return okText(`No QR pending right now. ${hint}${last}`)
       }
       const ascii = await renderQrAscii(qr)
       return okText(
@@ -673,7 +700,9 @@ export function registerTools(server: McpServer) {
       if (getLastError()) lines.push(`Last error: ${getLastError()}`)
       if (!isConnected()) {
         lines.push("")
-        if (getLastQr()) {
+        if (getLastError()?.includes("Logged out")) {
+          lines.push("Logged out — run the relink tool with wipe: true to clear the stale session and get a fresh QR (no OpenCode restart needed), then login_qr.")
+        } else if (getLastQr()) {
           lines.push("A QR is pending — run the login_qr tool to display it here, or open the QR file above.")
         } else {
           lines.push("To link: run login_qr (or open the QR file above) and scan with WhatsApp > Settings > Linked Devices.")

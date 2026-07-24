@@ -167,8 +167,8 @@ async function main() {
   console.log(
     "\nTools available to the agent: send_message, send_media, send_reaction, edit_message, delete_message,\n" +
       "read_messages, send_presence_update, send_location, send_contact, send_poll, download_media_message,\n" +
-      "group_fetch_all_participating, group_metadata, profile_picture_url, login_qr, connection_state,\n" +
-      "messages_upsert, chats.",
+      "group_fetch_all_participating, group_metadata, profile_picture_url, login_qr, relink,\n" +
+      "connection_state, messages_upsert, chats.",
   );
   console.log("Heads up: this uses an unofficial WhatsApp library; keep send volume low to avoid bans.");
 }

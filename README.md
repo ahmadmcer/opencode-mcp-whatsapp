@@ -77,6 +77,7 @@ Tool names mirror the underlying Baileys calls (snake_cased). Tools marked
 | `group_metadata` | A group's subject, description, owner, and participants. |
 | `profile_picture_url` | Profile-picture URL for a contact or group. |
 | `login_qr` | Show the pending linking QR as scannable ASCII, right in the TUI. |
+| `relink` | Reconnect in-process — optionally wipe the session for a fresh QR (after logout / to switch numbers), no OpenCode restart. |
 | `connection_state` | Connection state, your JID, QR path, active policy (send roots, allowlist, rate limit). |
 | `messages_upsert` | Recent inbound messages seen since the server connected (in-memory), each with an id other tools reference. |
 | `chats` | Chats seen since the server connected. |
@@ -102,7 +103,12 @@ own copy of the server, and WhatsApp only allows one live socket per link. When 
 newer session connects, older ones now **step aside** instead of fighting to
 reclaim the link — the previous behavior (a reconnect ping-pong) was what
 occasionally invalidated the session and forced a fresh QR scan. The newest
-session owns the connection; restart an older one if you want it to reclaim it.
+session owns the connection; restart an older one — or run `relink` — to reclaim it.
+
+**Got "Logged out"?** WhatsApp sometimes drops a linked device. You don't need to
+restart OpenCode: ask the agent to run `relink` with `wipe: true` (clears the
+stale session), then `login_qr` to scan a fresh code. Plain `relink` (no wipe)
+just reconnects with the existing session.
 
 ## Safety model
 
