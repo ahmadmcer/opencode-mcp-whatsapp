@@ -70,7 +70,7 @@ async function main() {
   // --- rate limit ---
   console.log("\nOutbound rate limit protects the account from spam loops / bans.");
   answers.sendMax = Number(
-    await promptText(prompter, "Max sends per window", { default: "10", validate: positiveIntValidator })
+    await promptText(prompter, "Max sends per window", { default: "5", validate: positiveIntValidator })
   );
   const windowSec = Number(
     await promptText(prompter, "Rate-limit window (seconds)", { default: "60", validate: positiveIntValidator })

@@ -30,7 +30,7 @@ import {
   stats as historyStats,
 } from "./historyStore.js"
 import { toJid, filenameOf, resolveWithinRoots, isInside, buildVcard } from "./utils.js"
-import { isRecipientAllowed, allowedRecipients, sendLimiter, rateLimitConfig } from "./policy.js"
+import { isRecipientAllowed, allowedRecipients, sendLimiter, rateLimitConfig, actionGapMs } from "./policy.js"
 
 // Directories `send_media` may read from and `download_media_message` may write to.
 // Defaults to the user's Downloads and a dedicated outbox; override with
@@ -724,6 +724,7 @@ export function registerTools(server: McpServer) {
         `Send roots: ${SEND_ROOTS.join(", ")}`,
         `Allowed recipients: ${allowedRecipients()?.join(", ") ?? "all (WHATSAPP_ALLOWED_RECIPIENTS unset)"}`,
         `Send rate limit: ${rateLimitConfig().max} per ${Math.round(rateLimitConfig().windowMs / 1000)}s`,
+        `Action pacing: ${actionGapMs() > 0 ? `min ${actionGapMs()}ms between operations` : "disabled"}`,
         `History sync: ${isSyncFullHistory() ? "full" : "recent only"} — stored ${historyStats().messages} messages across ${historyStats().chats} chats`,
       ]
       if (getLastError()) lines.push(`Last error: ${getLastError()}`)

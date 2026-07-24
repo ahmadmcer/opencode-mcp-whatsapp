@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { parseAllowList, isAllowed, createRateLimiter } from "./policy.js"
+import { parseAllowList, isAllowed, createRateLimiter, createPacer } from "./policy.js"
 
 test("parseAllowList normalizes numbers/JIDs and splits on , ; and newline", () => {
   const list = parseAllowList("+1 (555) 123-4567, 447700900123 ; 120363000000000000@g.us")
@@ -38,4 +38,21 @@ test("rate limiter frees capacity once the window slides past old sends", () => 
   assert.equal(rl.check(0).ok, true)
   assert.equal(rl.check(500).ok, false)
   assert.equal(rl.check(1000).ok, true) // the send at t=0 has aged out
+})
+
+test("pacer enforces a minimum gap between consecutive calls", async () => {
+  const pace = createPacer(40)
+  const t0 = Date.now()
+  await pace() // first call: no wait
+  await pace() // +40ms
+  await pace() // +40ms
+  assert.ok(Date.now() - t0 >= 75, "three paced calls should span ~2 gaps")
+})
+
+test("pacer with gap 0 is a no-op (disabled)", async () => {
+  const pace = createPacer(0)
+  const t0 = Date.now()
+  await pace()
+  await pace()
+  assert.ok(Date.now() - t0 < 20)
 })

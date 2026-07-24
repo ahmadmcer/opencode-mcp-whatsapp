@@ -15,6 +15,16 @@ contacts, and chats — through 41 tools exposed over the Model Context Protocol
 It's built on [Baileys](https://github.com/WhiskeySockets/Baileys) (an
 unofficial WhatsApp Web library) and runs entirely on your machine.
 
+> [!WARNING]
+> **Use a number you can afford to lose, and keep volume low.** This automates
+> WhatsApp through an unofficial library. Heavy or bursty activity — bulk sends,
+> rapid group/profile changes, stress-testing many tools back-to-back, repeated
+> re-links — can trigger WhatsApp's anti-spam system and get your **linked device
+> restricted** (often 7 days) or, if you push it, the account banned. Prefer a
+> spare/burner number, especially for testing. The server ships conservative
+> defaults (5 sends/60s and a 1s minimum gap between *all* operations), but they
+> only reduce the risk — they don't eliminate it.
+
 ## Quick start
 
 ```bash
@@ -44,7 +54,7 @@ for a post-install sanity check) but not required to install.
         "command": ["npx", "-y", "tsx", "index.ts"],
         "cwd": "<config-dir>/mcp-whatsapp",
         "enabled": true,
-        "environment": { "WHATSAPP_SEND_MAX": "10" }
+        "environment": { "WHATSAPP_SEND_MAX": "3" }
       }
     }
   }
@@ -199,9 +209,13 @@ gated:
 - **Recipient allowlist.** Optionally restrict who can be messaged
   (`WHATSAPP_ALLOWED_RECIPIENTS`). Unset means no restriction.
 - **Send rate limit.** At most `WHATSAPP_SEND_MAX` sends per
-  `WHATSAPP_SEND_WINDOW_MS` (default 10 / 60s), shared by every message-producing
+  `WHATSAPP_SEND_WINDOW_MS` (default **5 / 60s**), shared by every message-producing
   tool. Other mutating tools (group/chat/profile/block changes) also consume a
   token, so a runaway agent loop can't spam actions.
+- **Global action pacing.** Every WhatsApp operation — sends *and* reads like
+  `on_whatsapp`/group lookups — is serialized with a minimum gap
+  (`WHATSAPP_MIN_ACTION_GAP_MS`, default **1000ms**; set `0` to disable). This
+  smooths bursts, which are a key signal WhatsApp's anti-automation uses.
 - **History is local & git-ignored.** The stored message log lives in
   `~/.config/opencode/whatsapp-store/` (personal data) — the installer adds it to
   your config dir's `.gitignore` alongside the session, so it's never committed.

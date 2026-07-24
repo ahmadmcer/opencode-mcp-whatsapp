@@ -47,8 +47,9 @@ Everything the installer sets up, and why it's shaped this way.
 | Variable | Default | Purpose |
 |---|---|---|
 | `WHATSAPP_ALLOWED_RECIPIENTS` | unset → all allowed | Comma / `;` / newline list of phone numbers or JIDs permitted as send targets. Numbers are normalized to `<digits>@s.whatsapp.net`. |
-| `WHATSAPP_SEND_MAX` | `10` | Maximum sends per window. |
+| `WHATSAPP_SEND_MAX` | `5` | Maximum sends per window (lowered from 10 to reduce restriction risk). |
 | `WHATSAPP_SEND_WINDOW_MS` | `60000` | Rate-limit window, in milliseconds. |
+| `WHATSAPP_MIN_ACTION_GAP_MS` | `1000` | Minimum gap enforced between *any* two WhatsApp operations (sends and reads), to smooth bursts. `0` disables. |
 | `WHATSAPP_SEND_ROOT` | `~/Downloads` + `~/.config/opencode/whatsapp-outbox` | OS-path-separated list of directories `send_media` may read from and `download_media_message` may write to. |
 | `WHATSAPP_SYNC_FULL_HISTORY` | `true` | Ask WhatsApp for the fuller history window on link. Set `false` for a lighter, recent-only sync. |
 | `WHATSAPP_HISTORY_MAX` | `20000` | Max messages kept in the persistent history store (oldest evicted). |
@@ -199,6 +200,15 @@ list and read these by URI to pull state into context without invoking a tool:
   the refetch is rate-limited and a ban vector; `getMessage` (served from the raw
   buffer) for message-retry resend and poll-vote decryption; and `msgRetryCounterCache`
   to avoid retry loops.
+- **Restriction risk & pacing.** Automating an unofficial client can trip
+  WhatsApp's anti-spam system and get the **linked device restricted** (or the
+  account banned) — heavy/bursty activity is the trigger. Mitigations: a
+  conservative default send rate (`WHATSAPP_SEND_MAX` 5/60s, shared by all
+  message-producing tools), a rate-limit token on every mutating tool, and a
+  **global pacer** (`WHATSAPP_MIN_ACTION_GAP_MS`, default 1000ms) that serializes
+  *all* socket operations — sends and reads alike — through `store.ts`'s paced
+  socket proxy, so bursts are smoothed. These reduce but don't remove the risk;
+  use a burner number and keep volume low, especially when testing.
 - **History caveats.** WhatsApp only syncs a **limited recent window** to a linked
   device — the store can't hold a chat's entire archive. On-demand
   `fetch_message_history` is **best-effort**: WhatsApp frequently drops it for

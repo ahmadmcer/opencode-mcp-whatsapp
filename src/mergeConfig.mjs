@@ -67,7 +67,7 @@ export function registerWhatsappMcp(targetDir, environment) {
 export function buildEnvironment(answers) {
   const env = {};
   if (answers.allowlist) env.WHATSAPP_ALLOWED_RECIPIENTS = answers.allowlist;
-  if (answers.sendMax && answers.sendMax !== 10) env.WHATSAPP_SEND_MAX = String(answers.sendMax);
+  if (answers.sendMax && answers.sendMax !== 5) env.WHATSAPP_SEND_MAX = String(answers.sendMax);
   if (answers.windowMs && answers.windowMs !== 60000) env.WHATSAPP_SEND_WINDOW_MS = String(answers.windowMs);
   if (answers.sendRoot) env.WHATSAPP_SEND_ROOT = answers.sendRoot;
   return env;

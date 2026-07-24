@@ -68,7 +68,15 @@ function intEnv(name: string, def: number): number {
   return Number.isFinite(v) && v > 0 ? Math.floor(v) : def
 }
 
-const RATE_MAX = intEnv("WHATSAPP_SEND_MAX", 10)
+// Like intEnv but allows 0 (used to *disable* the pacer).
+function intEnvNonNeg(name: string, def: number): number {
+  const v = Number(process.env[name])
+  return Number.isFinite(v) && v >= 0 ? Math.floor(v) : def
+}
+
+// Default lowered from 10 to 5 — heavy automation on a real number is what trips
+// WhatsApp's anti-spam restrictions on linked devices.
+const RATE_MAX = intEnv("WHATSAPP_SEND_MAX", 5)
 const RATE_WINDOW_MS = intEnv("WHATSAPP_SEND_WINDOW_MS", 60_000)
 
 export function rateLimitConfig() {
@@ -76,3 +84,34 @@ export function rateLimitConfig() {
 }
 
 export const sendLimiter = createRateLimiter(RATE_MAX, RATE_WINDOW_MS)
+
+// --- Global action pacer -------------------------------------------------
+//
+// A minimum gap between *any* two WhatsApp operations (not just sends). Bursts of
+// rapid calls — even reads like onWhatsApp / group lookups — look automated and
+// help trip account restrictions, so every socket call is serialized through this
+// and spaced out. Set WHATSAPP_MIN_ACTION_GAP_MS=0 to disable.
+
+/** Returns a `pace()` that resolves at least `gapMs` after the previous one.
+ *  Calls are serialized (chained), so concurrent tool calls queue rather than race. */
+export function createPacer(gapMs: number) {
+  let lastAt = 0
+  let chain: Promise<void> = Promise.resolve()
+  return function pace(): Promise<void> {
+    if (gapMs <= 0) return Promise.resolve()
+    const next = chain.then(async () => {
+      const wait = lastAt + gapMs - Date.now()
+      if (wait > 0) await new Promise((r) => setTimeout(r, wait))
+      lastAt = Date.now()
+    })
+    chain = next.catch(() => {})
+    return next
+  }
+}
+
+const MIN_ACTION_GAP_MS = intEnvNonNeg("WHATSAPP_MIN_ACTION_GAP_MS", 1000)
+
+export function actionGapMs() {
+  return MIN_ACTION_GAP_MS
+}
+export const pace = createPacer(MIN_ACTION_GAP_MS)

@@ -12,6 +12,7 @@ import QRCode from "qrcode"
 import NodeCache from "node-cache"
 import { handleUpsert, extractMessage, getRawMessageById } from "./messages.js"
 import { recordMany as recordHistoryMany, upsertContact, setChatName } from "./historyStore.js"
+import { pace } from "./policy.js"
 
 type WASocket = ReturnType<typeof makeWASocket>
 
@@ -57,6 +58,7 @@ const logger: any = {
 }
 
 let sock: WASocket | null = null
+let pacedSock: WASocket | null = null
 let connected = false
 let meJid: string | null = null
 let lastError: string | null = null
@@ -66,8 +68,40 @@ let reconnecting = false
 let steppedAside = false
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
+// Socket methods that hit WhatsApp's servers. Calls to these (via the tools layer)
+// are spaced out by the global pacer so bursts don't look automated. Read-only
+// local tools don't touch the socket and aren't affected.
+const PACED_METHODS = new Set([
+  "sendMessage", "readMessages", "sendPresenceUpdate", "presenceSubscribe",
+  "onWhatsApp", "fetchStatus", "getBusinessProfile", "updateBlockStatus", "fetchBlocklist",
+  "profilePictureUrl", "groupMetadata", "groupCreate", "groupParticipantsUpdate",
+  "groupUpdateSubject", "groupUpdateDescription", "groupSettingUpdate", "groupInviteCode",
+  "groupRevokeInvite", "groupAcceptInvite", "groupGetInviteInfo", "groupLeave",
+  "groupFetchAllParticipating", "chatModify", "updateProfileName", "updateProfileStatus",
+  "updateProfilePicture", "removeProfilePicture", "fetchMessageHistory", "updateMediaMessage",
+])
+
+// Wrap the socket so every network method awaits the pacer first. Non-network
+// members pass through (bound to the real socket). Only the tools layer sees this
+// wrapper; store-internal code uses the raw `sock`, so event handlers never block.
+function wrapPaced(s: WASocket): WASocket {
+  return new Proxy(s, {
+    get(target, prop, receiver) {
+      const val = Reflect.get(target, prop, receiver)
+      if (typeof val !== "function") return val
+      if (PACED_METHODS.has(prop as string)) {
+        return async (...args: any[]) => {
+          await pace()
+          return (val as (...a: any[]) => any).apply(target, args)
+        }
+      }
+      return (val as (...a: any[]) => any).bind(target)
+    },
+  }) as WASocket
+}
+
 export function getSocket(): WASocket | null {
-  return sock
+  return pacedSock
 }
 export function isConnected() {
   return connected
@@ -157,6 +191,7 @@ export async function forceRelink(wipe: boolean): Promise<void> {
       ;(sock as any).end?.(undefined)
     } catch {}
     sock = null
+    pacedSock = null
   }
   connected = false
   meJid = null
@@ -216,6 +251,7 @@ export async function initConnection() {
     // in-memory raw buffer in messages.ts.
     getMessage: async (key: any) => getRawMessageById(key?.id)?.message ?? undefined,
   })
+  pacedSock = wrapPaced(sock)
 
   sock.ev.on("creds.update", saveCreds)
   // Attached here (not lazily in the tools layer) so it re-binds on every

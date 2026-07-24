@@ -40,8 +40,9 @@ then `login_qr` to re-link in place, no OpenCode restart needed.
 | Variable | Default | Purpose |
 |---|---|---|
 | `WHATSAPP_ALLOWED_RECIPIENTS` | (unset = all) | Comma/`;`/newline list of numbers or JIDs allowed as send targets. |
-| `WHATSAPP_SEND_MAX` | `10` | Max sends per window (rate limit). |
+| `WHATSAPP_SEND_MAX` | `5` | Max sends per window (rate limit). |
 | `WHATSAPP_SEND_WINDOW_MS` | `60000` | Rate-limit window in ms. |
+| `WHATSAPP_MIN_ACTION_GAP_MS` | `1000` | Minimum gap between *any* two WhatsApp operations. `0` disables. |
 | `WHATSAPP_SEND_ROOT` | `~/Downloads` + `~/.config/opencode/whatsapp-outbox` | OS-path-separated list of directories `send_media` may read from and `download_media_message` may write to. |
 | `WHATSAPP_SYNC_FULL_HISTORY` | `true` | Pull the fuller history window on link (`false` = recent only). |
 | `WHATSAPP_HISTORY_MAX` | `20000` | Max messages kept in the persistent history log at `../whatsapp-store/`. |
@@ -62,10 +63,14 @@ npm test
 - Message-action tools (`send_reaction`, `edit_message`, `delete_message`,
   `read_messages`, `download_media_message`) reference a `message_id` from
   `messages_upsert`; only messages seen since connect can be referenced.
-- Outbound sends are gated by an optional recipient allowlist and a rate limit;
-  other mutating tools (group/chat/profile/block changes) consume a rate-limit token.
+- Outbound sends are gated by an optional recipient allowlist and a rate limit
+  (default 5/60s); other mutating tools (group/chat/profile/block) consume a token
+  too. A global pacer (`WHATSAPP_MIN_ACTION_GAP_MS`, default 1000ms) spaces out
+  *every* socket operation to smooth bursts.
 - Chat history is stored locally at `../whatsapp-store/history.json` (personal data);
   the installer git-ignores it. `relink { wipe: true }` clears the session but keeps history.
-- This uses an unofficial WhatsApp library. Automating WhatsApp can violate its
-  Terms of Service and may get the account banned. Use a number you can afford to
-  lose, and keep send volume low.
+- **This uses an unofficial WhatsApp library.** Automating WhatsApp can violate its
+  Terms of Service. Heavy or bursty activity can get your **linked device restricted**
+  (often 7 days) or the account banned — use a number you can afford to lose (a
+  burner is best for testing) and keep volume low. The conservative defaults reduce
+  but do not remove this risk.
