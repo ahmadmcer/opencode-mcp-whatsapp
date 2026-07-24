@@ -3,6 +3,8 @@
 // attached to the socket inside store.initConnection(), so it re-binds on every
 // (re)connect — no messages are missed and no listener leaks to a dead socket.
 
+import { record as recordHistory } from "./historyStore.js"
+
 export type MediaType = "image" | "video" | "document" | "audio" | "sticker"
 
 // A minimal shape of the Baileys message key. Kept structural (not imported from
@@ -61,52 +63,73 @@ function detectMedia(message: any): { type: MediaType; placeholder: string } | n
   return null
 }
 
+// Parse a raw WAMessage into the normalized fields both the live buffer and the
+// history store need, or null for messages that are neither text nor recognized
+// media. Shared by handleUpsert (live) and the messaging-history.set handler.
+export function extractMessage(m: any): (Recent & { raw: any }) | null {
+  if (!m?.message || !m?.key) return null
+  // Documents sent with a caption arrive wrapped; unwrap so both the body and
+  // the media detection see the inner message.
+  const inner = m.message.documentWithCaptionMessage?.message ?? m.message
+  const text =
+    inner.conversation ||
+    inner.extendedTextMessage?.text ||
+    inner.imageMessage?.caption ||
+    inner.videoMessage?.caption ||
+    inner.documentMessage?.caption ||
+    ""
+  const media = detectMedia(inner)
+  if (!text && !media) return null
+  const from = m.key.remoteJid ?? "unknown"
+  return {
+    ts: Number(m.messageTimestamp ?? Math.floor(Date.now() / 1000)),
+    from: m.key.participant ?? from,
+    fromName: m.pushName ?? undefined,
+    body: text || media!.placeholder,
+    fromMe: m.key.fromMe ?? false,
+    id: m.key.id ?? "",
+    chatJid: from,
+    mediaType: media?.type,
+    key: m.key,
+    raw: m,
+  }
+}
+
+// Persist an extracted message into the searchable history store (used by both
+// the live and history-sync paths).
+export function toHistory(ex: Recent) {
+  recordHistory({
+    id: ex.id,
+    chatJid: ex.chatJid,
+    from: ex.from,
+    fromName: ex.fromName,
+    fromMe: ex.fromMe,
+    ts: ex.ts,
+    body: ex.body,
+    mediaType: ex.mediaType,
+  })
+}
+
 export function handleUpsert(evt: any) {
   // Only real-time notifications; skip history-sync ("append"/undefined) floods.
   if (evt?.type !== "notify") return
   for (const m of evt?.messages ?? []) {
-    if (!m?.message || !m?.key) continue
-    // Documents sent with a caption arrive wrapped; unwrap so both the body and
-    // the media detection see the inner message.
-    const inner = m.message.documentWithCaptionMessage?.message ?? m.message
-    const text =
-      inner.conversation ||
-      inner.extendedTextMessage?.text ||
-      inner.imageMessage?.caption ||
-      inner.videoMessage?.caption ||
-      inner.documentMessage?.caption ||
-      ""
-    const media = detectMedia(inner)
-    // Skip only messages that are neither text nor recognized media (receipts,
-    // reactions, protocol messages, ...).
-    if (!text && !media) continue
-    const body = text || media!.placeholder
-
-    const from = m.key.remoteJid ?? "unknown"
-    const id = m.key.id ?? ""
-    recent.push({
-      ts: Number(m.messageTimestamp ?? Math.floor(Date.now() / 1000)),
-      from: m.key.participant ?? from,
-      fromName: m.pushName,
-      body,
-      fromMe: m.key.fromMe ?? false,
-      id,
-      chatJid: from,
-      mediaType: media?.type,
-      key: m.key,
-    })
+    const ex = extractMessage(m)
+    if (!ex) continue
+    const { raw, ...rec } = ex
+    recent.push(rec)
     if (recent.length > MAX_RECENT) recent.shift()
 
-    rememberRaw(id, m)
+    rememberRaw(rec.id, m)
+    toHistory(rec)
 
-    const cur = chatMap.get(from) ?? { jid: from, name: m.pushName ?? from, lastTs: 0, lastBody: "" }
-    const ts = Number(m.messageTimestamp ?? 0)
-    if (ts >= cur.lastTs) {
-      cur.lastTs = ts
-      cur.lastBody = body.slice(0, 80)
-      if (m.pushName) cur.name = m.pushName
+    const cur = chatMap.get(rec.chatJid) ?? { jid: rec.chatJid, name: rec.fromName ?? rec.chatJid, lastTs: 0, lastBody: "" }
+    if (rec.ts >= cur.lastTs) {
+      cur.lastTs = rec.ts
+      cur.lastBody = rec.body.slice(0, 80)
+      if (rec.fromName) cur.name = rec.fromName
     }
-    chatMap.set(from, cur)
+    chatMap.set(rec.chatJid, cur)
     evictOldestChat()
   }
 }
@@ -130,7 +153,7 @@ export function recordOutgoing(sent: any, summary: string, mediaType?: MediaType
   const id = sent?.key?.id
   if (!id) return
   const jid = sent.key.remoteJid ?? "unknown"
-  recent.push({
+  const rec: Recent = {
     ts: Number(sent.messageTimestamp ?? Math.floor(Date.now() / 1000)),
     from: jid,
     fromName: "me",
@@ -140,9 +163,11 @@ export function recordOutgoing(sent: any, summary: string, mediaType?: MediaType
     chatJid: jid,
     mediaType,
     key: sent.key,
-  })
+  }
+  recent.push(rec)
   if (recent.length > MAX_RECENT) recent.shift()
   rememberRaw(id, sent)
+  toHistory(rec)
 }
 
 // Bound chatMap so a long-lived session that touches many chats can't grow
@@ -173,6 +198,12 @@ export function getChats(limit: number): ChatEntry[] {
 // Resolve an agent-supplied message id to its Baileys key + raw message. Returns
 // null when the id was never seen (or has aged out of the bounded buffer), which
 // the tool layer turns into a "call messages_upsert first" error.
+// The raw WAMessage for an id, or null. Backs the socket's `getMessage` config
+// (message-retry resend + poll-vote decryption).
+export function getRawMessageById(id: string): any | null {
+  return rawById.get(id) ?? null
+}
+
 export function getMessageById(id: string): ResolvedMessage | null {
   const raw = rawById.get(id)
   if (!raw) return null

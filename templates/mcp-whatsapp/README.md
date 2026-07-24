@@ -1,12 +1,20 @@
 # mcp-whatsapp
 
 A local [OpenCode](https://opencode.ai) / MCP server that links a WhatsApp
-account (via [Baileys](https://github.com/WhiskeySockets/Baileys)) and exposes
-Baileys-flavored tools: `send_message`, `send_media`, `send_reaction`,
-`edit_message`, `delete_message`, `read_messages`, `send_presence_update`,
-`send_location`, `send_contact`, `send_poll`, `download_media_message`,
-`group_fetch_all_participating`, `group_metadata`, `profile_picture_url`,
-`login_qr`, `relink`, `connection_state`, `messages_upsert`, `chats`.
+account (via [Baileys](https://github.com/WhiskeySockets/Baileys)) and exposes 41
+Baileys-flavored tools across: **messaging** (`send_message`, `send_media`,
+`send_reaction`, `edit_message`, `delete_message`, `send_location`,
+`send_contact`, `send_poll`), **history** (`load_messages`, `search_messages`,
+`chats`, `contacts`, `messages_upsert`, `fetch_message_history`), **groups**
+(`group_create`, `group_participants_update`, `group_update`,
+`group_setting_update`, `group_invite`, `group_accept_invite`,
+`group_get_invite_info`, `group_metadata`, `group_fetch_all_participating`,
+`group_leave`), **contacts/discovery** (`on_whatsapp`, `update_block_status`,
+`fetch_blocklist`, `get_business_profile`, `fetch_status`, `profile_picture_url`,
+`presence_subscribe`), **chat/profile** (`chat_modify`, `star_message`,
+`read_messages`, `send_presence_update`, `download_media_message`,
+`update_profile`, `update_profile_picture`), and **connection** (`login_qr`,
+`relink`, `connection_state`).
 
 This folder is installed by
 [`opencode-mcp-whatsapp`](https://github.com/ahmadmcer/opencode-mcp-whatsapp).
@@ -35,6 +43,8 @@ then `login_qr` to re-link in place, no OpenCode restart needed.
 | `WHATSAPP_SEND_MAX` | `10` | Max sends per window (rate limit). |
 | `WHATSAPP_SEND_WINDOW_MS` | `60000` | Rate-limit window in ms. |
 | `WHATSAPP_SEND_ROOT` | `~/Downloads` + `~/.config/opencode/whatsapp-outbox` | OS-path-separated list of directories `send_media` may read from and `download_media_message` may write to. |
+| `WHATSAPP_SYNC_FULL_HISTORY` | `true` | Pull the fuller history window on link (`false` = recent only). |
+| `WHATSAPP_HISTORY_MAX` | `20000` | Max messages kept in the persistent history log at `../whatsapp-store/`. |
 
 Set these in the `environment` block of the `whatsapp` server in your
 `opencode.jsonc`.
@@ -52,7 +62,10 @@ npm test
 - Message-action tools (`send_reaction`, `edit_message`, `delete_message`,
   `read_messages`, `download_media_message`) reference a `message_id` from
   `messages_upsert`; only messages seen since connect can be referenced.
-- Outbound sends are gated by an optional recipient allowlist and a rate limit.
+- Outbound sends are gated by an optional recipient allowlist and a rate limit;
+  other mutating tools (group/chat/profile/block changes) consume a rate-limit token.
+- Chat history is stored locally at `../whatsapp-store/history.json` (personal data);
+  the installer git-ignores it. `relink { wipe: true }` clears the session but keeps history.
 - This uses an unofficial WhatsApp library. Automating WhatsApp can violate its
   Terms of Service and may get the account banned. Use a number you can afford to
   lose, and keep send volume low.

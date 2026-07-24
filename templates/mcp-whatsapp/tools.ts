@@ -16,8 +16,19 @@ import {
   getLogger,
   getLastQr,
   forceRelink,
+  getPresence,
+  cacheGroupMetadata,
+  isSyncFullHistory,
 } from "./store.js"
-import { getRecent, getChats, getMessageById, recordOutgoing, type ResolvedMessage } from "./messages.js"
+import { getRecent, getMessageById, recordOutgoing, type ResolvedMessage } from "./messages.js"
+import {
+  getChatMessages,
+  searchMessages as searchHistory,
+  listChats as listHistoryChats,
+  listContacts,
+  oldestFor,
+  stats as historyStats,
+} from "./historyStore.js"
 import { toJid, filenameOf, resolveWithinRoots, isInside, buildVcard } from "./utils.js"
 import { isRecipientAllowed, allowedRecipients, sendLimiter, rateLimitConfig } from "./policy.js"
 
@@ -578,6 +589,7 @@ export function registerTools(server: McpServer) {
       if (!s || !isConnected()) return notConnected()
       try {
         const g = await s.groupMetadata(jid)
+        cacheGroupMetadata(jid, g) // warm the send-path cache
         const lines = [
           `Subject: ${g.subject ?? "(none)"}`,
           `JID: ${g.id}`,
@@ -696,6 +708,7 @@ export function registerTools(server: McpServer) {
         `Send roots: ${SEND_ROOTS.join(", ")}`,
         `Allowed recipients: ${allowedRecipients()?.join(", ") ?? "all (WHATSAPP_ALLOWED_RECIPIENTS unset)"}`,
         `Send rate limit: ${rateLimitConfig().max} per ${Math.round(rateLimitConfig().windowMs / 1000)}s`,
+        `History sync: ${isSyncFullHistory() ? "full" : "recent only"} — stored ${historyStats().messages} messages across ${historyStats().chats} chats`,
       ]
       if (getLastError()) lines.push(`Last error: ${getLastError()}`)
       if (!isConnected()) {
@@ -750,17 +763,682 @@ export function registerTools(server: McpServer) {
     {
       title: "List chats",
       description:
-        "List chats observed by the MCP (from recent message activity). Limited — only chats that sent a message while this MCP was running.",
+        "List known chats, most recent first — from the persistent history store (includes chats synced on link, not only those active since this run).",
       inputSchema: {
         limit: z.number().int().min(1).max(200).optional(),
       },
     },
     async ({ limit = 30 }) => {
-      const items = getChats(limit)
+      const items = listHistoryChats(limit)
       if (items.length === 0) {
-        return okText("No chats observed yet. The MCP only sees chats that have sent a message since it connected.")
+        return okText("No chats known yet. History syncs shortly after linking; ask the user to send a message if it stays empty.")
       }
-      return okText(items.map((c, i) => `${i + 1}. ${c.name} (${c.jid}) — last: ${c.lastBody}`).join("\n"))
+      return okText(items.map((c, i) => `${i + 1}. ${c.name ?? c.jid} (${c.jid}) — last: ${c.lastBody}`).join("\n"))
+    },
+  )
+
+  // ======================================================================
+  // History (persistent, searchable)
+  // ======================================================================
+
+  server.registerTool(
+    "load_messages",
+    {
+      title: "Read a chat's messages",
+      description:
+        "Read stored messages for a chat from the persistent history (survives restarts). `chat` is a phone number or JID. Page older with `before` (a unix-seconds timestamp). Returns messages oldest→newest with ids.",
+      inputSchema: {
+        chat: z.string(),
+        limit: z.number().int().min(1).max(200).optional(),
+        before: z.number().int().positive().optional(),
+      },
+    },
+    async ({ chat, limit = 30, before }) => {
+      let jid: string
+      try {
+        jid = toJid(chat)
+      } catch (e) {
+        return errText(`Error: ${(e as Error).message}`)
+      }
+      const items = getChatMessages(jid, { limit, before })
+      if (items.length === 0) {
+        return okText(
+          `No stored messages for ${jid}. History only covers WhatsApp's recent window plus messages seen since linking; try fetch_message_history for older ones (best-effort).`,
+        )
+      }
+      return okText(
+        items
+          .map((m) => `[id:${m.id}] [${new Date(m.ts * 1000).toISOString()}] ${m.fromMe ? "me" : m.fromName ?? m.from}: ${m.body}`)
+          .join("\n"),
+      )
+    },
+  )
+
+  server.registerTool(
+    "search_messages",
+    {
+      title: "Search message history",
+      description:
+        "Case-insensitive substring search over stored message text, newest first. Optionally restrict to one `chat` (phone or JID).",
+      inputSchema: {
+        query: z.string().min(1),
+        chat: z.string().optional(),
+        limit: z.number().int().min(1).max(200).optional(),
+      },
+    },
+    async ({ query, chat, limit = 30 }) => {
+      let chatJid: string | undefined
+      if (chat) {
+        try {
+          chatJid = toJid(chat)
+        } catch (e) {
+          return errText(`Error: ${(e as Error).message}`)
+        }
+      }
+      const items = searchHistory(query, { chat: chatJid, limit })
+      if (items.length === 0) return okText(`No stored messages match "${query}".`)
+      return okText(
+        items
+          .map((m) => `[id:${m.id}] [${new Date(m.ts * 1000).toISOString()}] ${m.chatJid} — ${m.fromMe ? "me" : m.fromName ?? m.from}: ${m.body}`)
+          .join("\n"),
+      )
+    },
+  )
+
+  server.registerTool(
+    "fetch_message_history",
+    {
+      title: "Fetch older history (best-effort)",
+      description:
+        "Ask WhatsApp for messages older than what's stored for a chat, via on-demand history sync. Best-effort: WhatsApp often ignores this for linked devices. Any results arrive asynchronously and land in the history store — re-run load_messages after a few seconds.",
+      inputSchema: {
+        chat: z.string(),
+        count: z.number().int().min(1).max(50).optional(),
+      },
+    },
+    async ({ chat, count = 50 }) => {
+      const s = getSocket()
+      if (!s || !isConnected()) return notConnected()
+      let jid: string
+      try {
+        jid = toJid(chat)
+      } catch (e) {
+        return errText(`Error: ${(e as Error).message}`)
+      }
+      const oldest = oldestFor(jid)
+      if (!oldest) return errText(`No stored messages for ${jid} yet — nothing to page back from. Open the chat / wait for history sync first.`)
+      const limited = rateLimited()
+      if (limited) return limited
+      try {
+        await (s as any).fetchMessageHistory(count, { remoteJid: jid, id: oldest.id, fromMe: oldest.fromMe }, oldest.ts)
+        return okText(`Requested up to ${count} older messages for ${jid}. Best-effort — re-run load_messages in a few seconds to see any that arrived.`)
+      } catch (e) {
+        return errText(`Fetch failed: ${(e as Error).message}`)
+      }
+    },
+  )
+
+  server.registerTool(
+    "contacts",
+    {
+      title: "List known contacts",
+      description: "List contacts captured from WhatsApp's history sync (name + JID). Limited to what WhatsApp shared with this device.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(500).optional(),
+      },
+    },
+    async ({ limit = 100 }) => {
+      const items = listContacts(limit)
+      if (items.length === 0) return okText("No contacts known yet (they arrive with history sync after linking).")
+      return okText(items.map((c, i) => `${i + 1}. ${c.name ?? "(no name)"} (${c.jid})`).join("\n"))
+    },
+  )
+
+  // ======================================================================
+  // Group management
+  // ======================================================================
+
+  server.registerTool(
+    "group_create",
+    {
+      title: "Create a group",
+      description: "Create a WhatsApp group with a subject and initial participants (phone numbers or JIDs). Rate-limited.",
+      inputSchema: {
+        subject: z.string().min(1),
+        participants: z.array(z.string()).min(1).max(50),
+      },
+    },
+    async ({ subject, participants }) => {
+      const s = getSocket()
+      if (!s || !isConnected()) return notConnected()
+      let jids: string[]
+      try {
+        jids = participants.map(toJid)
+      } catch (e) {
+        return errText(`Error: ${(e as Error).message}`)
+      }
+      const limited = rateLimited()
+      if (limited) return limited
+      try {
+        const g = await s.groupCreate(subject, jids)
+        return okText(`Created group "${subject}" (${g.id}) with ${g.participants?.length ?? jids.length} participants.`)
+      } catch (e) {
+        return errText(`Create failed: ${(e as Error).message}`)
+      }
+    },
+  )
+
+  server.registerTool(
+    "group_participants_update",
+    {
+      title: "Add/remove/promote group members",
+      description: "Modify group participants. `action` is add | remove | promote | demote. `jid` is the group JID; `participants` are phone numbers or JIDs. Requires admin. Rate-limited.",
+      inputSchema: {
+        jid: z.string(),
+        participants: z.array(z.string()).min(1).max(50),
+        action: z.enum(["add", "remove", "promote", "demote"]),
+      },
+    },
+    async ({ jid, participants, action }) => {
+      const s = getSocket()
+      if (!s || !isConnected()) return notConnected()
+      let jids: string[]
+      try {
+        jids = participants.map(toJid)
+      } catch (e) {
+        return errText(`Error: ${(e as Error).message}`)
+      }
+      const limited = rateLimited()
+      if (limited) return limited
+      try {
+        const res = await s.groupParticipantsUpdate(jid, jids, action)
+        return okText(`${action} on ${jid}:\n${(res ?? []).map((r: any) => `  ${r.jid}: ${r.status}`).join("\n") || "(done)"}`)
+      } catch (e) {
+        return errText(`Update failed: ${(e as Error).message}`)
+      }
+    },
+  )
+
+  server.registerTool(
+    "group_update",
+    {
+      title: "Update group subject/description",
+      description: "Change a group's subject and/or description. `jid` is the group JID. Requires admin. Rate-limited.",
+      inputSchema: {
+        jid: z.string(),
+        subject: z.string().optional(),
+        description: z.string().optional(),
+      },
+    },
+    async ({ jid, subject, description }) => {
+      const s = getSocket()
+      if (!s || !isConnected()) return notConnected()
+      if (!subject && description === undefined) return errText("Provide subject and/or description.")
+      const limited = rateLimited()
+      if (limited) return limited
+      try {
+        if (subject) await s.groupUpdateSubject(jid, subject)
+        if (description !== undefined) await s.groupUpdateDescription(jid, description)
+        return okText(`Updated ${jid}${subject ? ` (subject)` : ""}${description !== undefined ? ` (description)` : ""}.`)
+      } catch (e) {
+        return errText(`Update failed: ${(e as Error).message}`)
+      }
+    },
+  )
+
+  server.registerTool(
+    "group_setting_update",
+    {
+      title: "Change group settings",
+      description:
+        "Change who can post/edit: announcement (only admins send), not_announcement (all send), locked (only admins edit info), unlocked (all edit). Requires admin. Rate-limited.",
+      inputSchema: {
+        jid: z.string(),
+        setting: z.enum(["announcement", "not_announcement", "locked", "unlocked"]),
+      },
+    },
+    async ({ jid, setting }) => {
+      const s = getSocket()
+      if (!s || !isConnected()) return notConnected()
+      const limited = rateLimited()
+      if (limited) return limited
+      try {
+        await s.groupSettingUpdate(jid, setting)
+        return okText(`Set ${setting} on ${jid}.`)
+      } catch (e) {
+        return errText(`Update failed: ${(e as Error).message}`)
+      }
+    },
+  )
+
+  server.registerTool(
+    "group_invite",
+    {
+      title: "Get or revoke group invite link",
+      description: "Get the group's invite link, or revoke it and get a new one. `action` is get | revoke. Requires admin. Revoking invalidates the old link.",
+      inputSchema: {
+        jid: z.string(),
+        action: z.enum(["get", "revoke"]).optional(),
+      },
+    },
+    async ({ jid, action = "get" }) => {
+      const s = getSocket()
+      if (!s || !isConnected()) return notConnected()
+      if (action === "revoke") {
+        const limited = rateLimited()
+        if (limited) return limited
+      }
+      try {
+        const code = action === "revoke" ? await s.groupRevokeInvite(jid) : await s.groupInviteCode(jid)
+        return okText(`${action === "revoke" ? "New invite" : "Invite"} link for ${jid}: https://chat.whatsapp.com/${code}`)
+      } catch (e) {
+        return errText(`Failed: ${(e as Error).message}`)
+      }
+    },
+  )
+
+  server.registerTool(
+    "group_accept_invite",
+    {
+      title: "Join a group by invite",
+      description: "Join a group using an invite code or full https://chat.whatsapp.com/... link. Rate-limited.",
+      inputSchema: {
+        code: z.string().min(1),
+      },
+    },
+    async ({ code }) => {
+      const s = getSocket()
+      if (!s || !isConnected()) return notConnected()
+      const c = code.trim().split("/").pop() ?? code.trim()
+      const limited = rateLimited()
+      if (limited) return limited
+      try {
+        const jid = await s.groupAcceptInvite(c)
+        return okText(`Joined group ${jid ?? "(unknown)"}.`)
+      } catch (e) {
+        return errText(`Join failed: ${(e as Error).message}`)
+      }
+    },
+  )
+
+  server.registerTool(
+    "group_get_invite_info",
+    {
+      title: "Preview a group invite",
+      description: "Look up a group's metadata from an invite code or link without joining.",
+      inputSchema: {
+        code: z.string().min(1),
+      },
+    },
+    async ({ code }) => {
+      const s = getSocket()
+      if (!s || !isConnected()) return notConnected()
+      const c = code.trim().split("/").pop() ?? code.trim()
+      try {
+        const g: any = await s.groupGetInviteInfo(c)
+        return okText(`${g.subject ?? "(no subject)"} (${g.id}) — ${g.size ?? g.participants?.length ?? "?"} members`)
+      } catch (e) {
+        return errText(`Lookup failed: ${(e as Error).message}`)
+      }
+    },
+  )
+
+  server.registerTool(
+    "group_leave",
+    {
+      title: "Leave a group",
+      description: "Leave a group. This is irreversible — you'd need a new invite to rejoin. `jid` is the group JID. Rate-limited.",
+      inputSchema: {
+        jid: z.string(),
+      },
+    },
+    async ({ jid }) => {
+      const s = getSocket()
+      if (!s || !isConnected()) return notConnected()
+      const limited = rateLimited()
+      if (limited) return limited
+      try {
+        await s.groupLeave(jid)
+        return okText(`Left ${jid}.`)
+      } catch (e) {
+        return errText(`Leave failed: ${(e as Error).message}`)
+      }
+    },
+  )
+
+  // ======================================================================
+  // Contacts & discovery
+  // ======================================================================
+
+  server.registerTool(
+    "on_whatsapp",
+    {
+      title: "Check numbers on WhatsApp",
+      description: "Check whether phone numbers are registered on WhatsApp (and get their JIDs). Useful before sending. Pass numbers in international format.",
+      inputSchema: {
+        numbers: z.array(z.string()).min(1).max(20),
+      },
+    },
+    async ({ numbers }) => {
+      const s = getSocket()
+      if (!s || !isConnected()) return notConnected()
+      try {
+        const results = await s.onWhatsApp(...numbers)
+        return okText(
+          numbers
+            .map((n) => {
+              const hit = (results ?? []).find((r: any) => r.jid?.startsWith(n.replace(/\D/g, "")))
+              return `${n}: ${hit?.exists ? `on WhatsApp (${hit.jid})` : "not on WhatsApp"}`
+            })
+            .join("\n"),
+        )
+      } catch (e) {
+        return errText(`Lookup failed: ${(e as Error).message}`)
+      }
+    },
+  )
+
+  server.registerTool(
+    "update_block_status",
+    {
+      title: "Block or unblock a contact",
+      description: "Block or unblock a contact. `to` is a phone number or JID; `action` is block | unblock. Blocking stops all messages from them. Rate-limited.",
+      inputSchema: {
+        to: z.string(),
+        action: z.enum(["block", "unblock"]),
+      },
+    },
+    async ({ to, action }) => {
+      const s = getSocket()
+      if (!s || !isConnected()) return notConnected()
+      let jid: string
+      try {
+        jid = toJid(to)
+      } catch (e) {
+        return errText(`Error: ${(e as Error).message}`)
+      }
+      const limited = rateLimited()
+      if (limited) return limited
+      try {
+        await s.updateBlockStatus(jid, action)
+        return okText(`${action === "block" ? "Blocked" : "Unblocked"} ${jid}.`)
+      } catch (e) {
+        return errText(`Failed: ${(e as Error).message}`)
+      }
+    },
+  )
+
+  server.registerTool(
+    "fetch_blocklist",
+    {
+      title: "List blocked contacts",
+      description: "List the JIDs you have blocked.",
+      inputSchema: {},
+    },
+    async () => {
+      const s = getSocket()
+      if (!s || !isConnected()) return notConnected()
+      try {
+        const list = await s.fetchBlocklist()
+        return okText(list?.length ? list.join("\n") : "No blocked contacts.")
+      } catch (e) {
+        return errText(`Failed: ${(e as Error).message}`)
+      }
+    },
+  )
+
+  server.registerTool(
+    "get_business_profile",
+    {
+      title: "Business profile",
+      description: "Fetch a WhatsApp Business profile (description, category, email, website) for a number or JID, if it's a business account.",
+      inputSchema: {
+        to: z.string(),
+      },
+    },
+    async ({ to }) => {
+      const s = getSocket()
+      if (!s || !isConnected()) return notConnected()
+      let jid: string
+      try {
+        jid = toJid(to)
+      } catch (e) {
+        return errText(`Error: ${(e as Error).message}`)
+      }
+      try {
+        const p: any = await s.getBusinessProfile(jid)
+        if (!p) return okText(`${jid} has no business profile (not a business account).`)
+        const lines = [
+          `Business: ${jid}`,
+          p.description ? `Description: ${p.description}` : null,
+          p.category ? `Category: ${p.category}` : null,
+          p.email ? `Email: ${p.email}` : null,
+          p.website?.length ? `Website: ${p.website.join(", ")}` : null,
+          p.address ? `Address: ${p.address}` : null,
+        ].filter(Boolean)
+        return okText(lines.join("\n"))
+      } catch (e) {
+        return errText(`Failed: ${(e as Error).message}`)
+      }
+    },
+  )
+
+  server.registerTool(
+    "fetch_status",
+    {
+      title: "Contact about/status text",
+      description: "Fetch a contact's About text (the 'status' line, not a story) for a number or JID.",
+      inputSchema: {
+        to: z.string(),
+      },
+    },
+    async ({ to }) => {
+      const s = getSocket()
+      if (!s || !isConnected()) return notConnected()
+      let jid: string
+      try {
+        jid = toJid(to)
+      } catch (e) {
+        return errText(`Error: ${(e as Error).message}`)
+      }
+      try {
+        const res: any = await s.fetchStatus(jid)
+        const st = Array.isArray(res) ? res[0]?.status : res
+        if (!st?.status) return okText(`No About text visible for ${jid}.`)
+        return okText(`${jid} — About: ${st.status}${st.setAt ? ` (set ${new Date(st.setAt).toISOString()})` : ""}`)
+      } catch (e) {
+        return errText(`Failed: ${(e as Error).message}`)
+      }
+    },
+  )
+
+  server.registerTool(
+    "presence_subscribe",
+    {
+      title: "Subscribe to presence",
+      description: "Subscribe to a contact's presence (online/typing/last-seen) and return the latest known value. Presence arrives asynchronously — re-run to see updates. `to` is a phone number or JID.",
+      inputSchema: {
+        to: z.string(),
+      },
+    },
+    async ({ to }) => {
+      const s = getSocket()
+      if (!s || !isConnected()) return notConnected()
+      let jid: string
+      try {
+        jid = toJid(to)
+      } catch (e) {
+        return errText(`Error: ${(e as Error).message}`)
+      }
+      try {
+        await s.presenceSubscribe(jid)
+        const p = getPresence(jid)
+        return okText(p ? `${jid}: ${p}` : `Subscribed to ${jid}. No presence received yet — re-run in a moment.`)
+      } catch (e) {
+        return errText(`Failed: ${(e as Error).message}`)
+      }
+    },
+  )
+
+  // ======================================================================
+  // Chat & profile management
+  // ======================================================================
+
+  server.registerTool(
+    "chat_modify",
+    {
+      title: "Modify a chat",
+      description:
+        "Change a chat's state. `action` is mute | unmute | archive | unarchive | pin | unpin | mark_read | mark_unread | delete. `mute_hours` sets a mute duration (default 8). delete removes the chat from your list (irreversible on this device). `to` is a phone number or JID. Rate-limited.",
+      inputSchema: {
+        to: z.string(),
+        action: z.enum(["mute", "unmute", "archive", "unarchive", "pin", "unpin", "mark_read", "mark_unread", "delete"]),
+        mute_hours: z.number().positive().max(720).optional(),
+      },
+    },
+    async ({ to, action, mute_hours = 8 }) => {
+      const s = getSocket()
+      if (!s || !isConnected()) return notConnected()
+      let jid: string
+      try {
+        jid = toJid(to)
+      } catch (e) {
+        return errText(`Error: ${(e as Error).message}`)
+      }
+      const last = getChatMessages(jid, { limit: 1 })[0]
+      const lastMessages = last ? [{ key: { remoteJid: jid, id: last.id, fromMe: last.fromMe }, messageTimestamp: last.ts }] : []
+      const limited = rateLimited()
+      if (limited) return limited
+      let mod: any
+      switch (action) {
+        case "mute":
+          mod = { mute: mute_hours * 60 * 60 * 1000 }
+          break
+        case "unmute":
+          mod = { mute: null }
+          break
+        case "archive":
+          mod = { archive: true, lastMessages }
+          break
+        case "unarchive":
+          mod = { archive: false, lastMessages }
+          break
+        case "pin":
+          mod = { pin: true }
+          break
+        case "unpin":
+          mod = { pin: false }
+          break
+        case "mark_read":
+          mod = { markRead: true, lastMessages }
+          break
+        case "mark_unread":
+          mod = { markRead: false, lastMessages }
+          break
+        case "delete":
+          mod = { delete: true, lastMessages }
+          break
+      }
+      try {
+        await s.chatModify(mod, jid)
+        return okText(`${action} applied to ${jid}.`)
+      } catch (e) {
+        return errText(`Failed: ${(e as Error).message}`)
+      }
+    },
+  )
+
+  server.registerTool(
+    "star_message",
+    {
+      title: "Star/unstar a message",
+      description: "Star or unstar a message. `message_id` comes from messages_upsert / load_messages. `star` true to star, false to unstar. Rate-limited.",
+      inputSchema: {
+        message_id: z.string(),
+        star: z.boolean().optional(),
+      },
+    },
+    async ({ message_id, star = true }) => {
+      const s = getSocket()
+      if (!s || !isConnected()) return notConnected()
+      const r = resolveMsg(message_id)
+      if ("err" in r) return r.err
+      const limited = rateLimited()
+      if (limited) return limited
+      try {
+        await s.chatModify(
+          { star: { messages: [{ id: message_id, fromMe: r.msg.key.fromMe ?? false }], star } } as any,
+          r.msg.chatJid,
+        )
+        return okText(`${star ? "Starred" : "Unstarred"} ${message_id}.`)
+      } catch (e) {
+        return errText(`Failed: ${(e as Error).message}`)
+      }
+    },
+  )
+
+  server.registerTool(
+    "update_profile",
+    {
+      title: "Update your profile",
+      description: "Update your own WhatsApp profile name and/or About text. Rate-limited.",
+      inputSchema: {
+        name: z.string().min(1).max(25).optional(),
+        status: z.string().max(139).optional(),
+      },
+    },
+    async ({ name, status }) => {
+      const s = getSocket()
+      if (!s || !isConnected()) return notConnected()
+      if (name === undefined && status === undefined) return errText("Provide name and/or status.")
+      const limited = rateLimited()
+      if (limited) return limited
+      try {
+        if (name !== undefined) await s.updateProfileName(name)
+        if (status !== undefined) await s.updateProfileStatus(status)
+        return okText(`Updated your profile${name !== undefined ? " (name)" : ""}${status !== undefined ? " (about)" : ""}.`)
+      } catch (e) {
+        return errText(`Failed: ${(e as Error).message}`)
+      }
+    },
+  )
+
+  server.registerTool(
+    "update_profile_picture",
+    {
+      title: "Set/remove your profile picture",
+      description:
+        "Set your own profile picture from a local image (must be under an allowed send directory), or remove it with `remove: true`. Rate-limited.",
+      inputSchema: {
+        filePath: z.string().optional(),
+        remove: z.boolean().optional(),
+      },
+    },
+    async ({ filePath, remove = false }) => {
+      const s = getSocket()
+      if (!s || !isConnected()) return notConnected()
+      const me = getMyJid()
+      if (!me) return errText("Not connected — no own JID yet.")
+      const limited = rateLimited()
+      if (limited) return limited
+      try {
+        if (remove) {
+          await s.removeProfilePicture(me)
+          return okText("Removed your profile picture.")
+        }
+        if (!filePath) return errText("Provide filePath (an image under an allowed send directory) or remove: true.")
+        let safePath: string
+        try {
+          safePath = resolveWithinRoots(SEND_ROOTS, filePath)
+          if (isInside(getAuthDir(), safePath)) throw new Error("Refusing to read from the WhatsApp auth directory.")
+        } catch (e) {
+          return errText((e as Error).message)
+        }
+        await s.updateProfilePicture(me, { url: safePath })
+        return okText(`Updated your profile picture from ${safePath}.`)
+      } catch (e) {
+        return errText(`Failed: ${(e as Error).message}`)
+      }
     },
   )
 }

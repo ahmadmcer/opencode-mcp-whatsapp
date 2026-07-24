@@ -2,9 +2,21 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { startConnection } from "./store.js"
 import { registerTools } from "./tools.js"
+import { load as loadHistory, flush as flushHistory } from "./historyStore.js"
 
-const server = new McpServer({ name: "whatsapp", version: "1.2.1" })
+const server = new McpServer({ name: "whatsapp", version: "1.3.0" })
 registerTools(server)
+
+// Load persisted chat history before connecting, so tools can read past chats
+// immediately and history-sync merges into what's already on disk.
+loadHistory()
+// Persist any pending history on shutdown (debounced writes may not have flushed).
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.on(sig, () => {
+    flushHistory()
+    process.exit(0)
+  })
+}
 
 // Bring the MCP transport up first so tools (including `connection_state`) are
 // always reachable, then connect to WhatsApp in the background. WhatsApp being

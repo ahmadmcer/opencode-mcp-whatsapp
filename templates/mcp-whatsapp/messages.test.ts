@@ -1,6 +1,7 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import { handleUpsert, getRecent, getMessageById, recordOutgoing } from "./messages.js"
+import { getChatMessages } from "./historyStore.js"
 
 // Build a synthetic Baileys "notify" upsert event for one message.
 function notify(msg: any) {
@@ -58,6 +59,14 @@ test("getMessageById returns the stored key and raw message", () => {
 
 test("getMessageById returns null for an unknown id", () => {
   assert.equal(getMessageById("NOPE"), null)
+})
+
+test("a live upsert is also persisted to the searchable history store", () => {
+  handleUpsert(notify(textMsg("HX1", "hxchat@s.whatsapp.net", "hello history", 4242)))
+  const stored = getChatMessages("hxchat@s.whatsapp.net", { limit: 10 })
+  const found = stored.find((m) => m.id === "HX1")
+  assert.ok(found, "handleUpsert should record into historyStore")
+  assert.equal(found!.body, "hello history")
 })
 
 test("recordOutgoing makes a sent message resolvable for edit/delete/react", () => {

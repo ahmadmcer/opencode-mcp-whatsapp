@@ -9,13 +9,36 @@ import makeWASocket, {
   DisconnectReason,
 } from "@whiskeysockets/baileys"
 import QRCode from "qrcode"
-import { handleUpsert } from "./messages.js"
+import NodeCache from "node-cache"
+import { handleUpsert, extractMessage, getRawMessageById } from "./messages.js"
+import { recordMany as recordHistoryMany, upsertContact, setChatName } from "./historyStore.js"
 
 type WASocket = ReturnType<typeof makeWASocket>
 
 const AUTH_DIR = join(homedir(), ".config", "opencode", "whatsapp")
 const QR_FILE = join(AUTH_DIR, "qr.png")
 const MAX_BACKOFF_MS = 30_000
+const SYNC_FULL_HISTORY = process.env.WHATSAPP_SYNC_FULL_HISTORY !== "false"
+
+// Caches recommended by Baileys for reliability/performance:
+// - groupCache: avoids re-fetching a group's participant list on every send
+//   (that refetch is rate-limited and a ban vector). Refreshed on groups.update.
+// - msgRetryCounter: prevents message-retry loops across reconnects.
+const groupCache = new NodeCache({ stdTTL: 300, useClones: false })
+const msgRetryCounterCache = new NodeCache()
+// Last-known presence per JID, populated from presence.update after a
+// presence_subscribe. Ephemeral (not persisted).
+const presenceByJid = new Map<string, string>()
+export function getPresence(jid: string): string | null {
+  return presenceByJid.get(jid) ?? null
+}
+export function isSyncFullHistory() {
+  return SYNC_FULL_HISTORY
+}
+// Exposed so group_metadata can warm the cache that speeds up group sends.
+export function cacheGroupMetadata(jid: string, meta: any) {
+  groupCache.set(jid, meta)
+}
 
 // Baileys is chatty. Keep info/debug/trace silent, but surface warn/error/fatal
 // on STDERR — never stdout, which is the MCP JSON-RPC channel. This restores
@@ -179,14 +202,69 @@ export async function initConnection() {
     // the browser stays a real value (Chrome) so pairing behaves normally. The
     // name is baked in at pairing time — changing it only affects a fresh link.
     browser: ["OpenCode", "Chrome", "131.0.0.0"],
-    syncFullHistory: false,
+    // Request the fuller history WhatsApp will send a linked device (still a
+    // limited recent window, not the whole archive). Toggle with the env var.
+    syncFullHistory: SYNC_FULL_HISTORY,
     generateHighQualityLinkPreview: false,
+    // Keep the phone receiving notifications while the agent is connected —
+    // by default Baileys marks the account online on connect, which mutes them.
+    markOnlineOnConnect: false,
+    // Reliability/performance caches (see definitions above).
+    cachedGroupMetadata: async (jid: string) => groupCache.get(jid),
+    msgRetryCounterCache,
+    // Needed for message-retry resend and poll-vote decryption; served from the
+    // in-memory raw buffer in messages.ts.
+    getMessage: async (key: any) => getRawMessageById(key?.id)?.message ?? undefined,
   })
 
   sock.ev.on("creds.update", saveCreds)
   // Attached here (not lazily in the tools layer) so it re-binds on every
   // reconnect and never misses messages that arrive before a tool is first called.
   sock.ev.on("messages.upsert", handleUpsert)
+
+  // History sync: WhatsApp sends past chats/contacts/messages after linking.
+  // Ingest them into the persistent, searchable history store.
+  sock.ev.on("messaging-history.set", (h: any) => {
+    try {
+      const msgs = (h?.messages ?? []).map(extractMessage).filter(Boolean).map((ex: any) => {
+        const { raw, key, ...rec } = ex
+        return rec
+      })
+      if (msgs.length) recordHistoryMany(msgs)
+      for (const c of h?.contacts ?? []) upsertContact({ jid: c.id, name: c.name ?? c.notify ?? c.verifiedName })
+      for (const ch of h?.chats ?? []) setChatName(ch.id, ch.name ?? ch.subject)
+    } catch (e) {
+      log(`history-sync ingest failed: ${(e as Error).message}`)
+    }
+  })
+
+  // Keep the group-metadata cache fresh so group sends stay fast and avoid the
+  // rate-limited participant refetch.
+  sock.ev.on("groups.update", async (updates: any[]) => {
+    for (const u of updates ?? []) {
+      if (!u?.id) continue
+      try {
+        groupCache.set(u.id, await sock!.groupMetadata(u.id))
+      } catch {}
+    }
+  })
+  sock.ev.on("group-participants.update", async (u: any) => {
+    if (!u?.id) return
+    try {
+      groupCache.set(u.id, await sock!.groupMetadata(u.id))
+    } catch {}
+  })
+
+  // Cache presence updates (from presence_subscribe) for later reads.
+  sock.ev.on("presence.update", (u: any) => {
+    const jid = u?.id
+    const presences = u?.presences ?? {}
+    for (const pj of Object.keys(presences)) {
+      const last = presences[pj]?.lastKnownPresence
+      if (last) presenceByJid.set(pj, last)
+    }
+    if (jid && presences[jid]?.lastKnownPresence) presenceByJid.set(jid, presences[jid].lastKnownPresence)
+  })
 
   sock.ev.on("connection.update", (u: any) => {
     const { connection, qr, lastDisconnect } = u

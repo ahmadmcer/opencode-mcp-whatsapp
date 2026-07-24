@@ -10,13 +10,15 @@ Everything the installer sets up, and why it's shaped this way.
 ├── mcp-whatsapp/           # the server (copied from templates/)
 │   ├── index.ts            # entry: brings up MCP transport, then WhatsApp in the background
 │   ├── store.ts            # Baileys socket, auth, QR, reconnection with backoff
-│   ├── messages.ts         # in-memory ingestion of inbound messages (bounded)
+│   ├── messages.ts         # live in-memory ingestion (raw buffer for action tools)
+│   ├── historyStore.ts     # persistent, searchable message log (JSON)
 │   ├── tools.ts            # the MCP tools + policy enforcement
 │   ├── policy.ts           # recipient allowlist + send rate limiter
 │   ├── utils.ts            # pure helpers (JID parsing, path sandbox)
 │   ├── *.test.ts           # unit tests (run with `npm test`)
 │   └── package.json
-└── whatsapp/               # created at first run — session creds + qr.png (git-ignored)
+├── whatsapp/               # created at first run — session creds + qr.png (git-ignored)
+└── whatsapp-store/         # persisted chat history — history.json (git-ignored, personal data)
 ```
 
 ## The server entry
@@ -47,6 +49,8 @@ Everything the installer sets up, and why it's shaped this way.
 | `WHATSAPP_SEND_MAX` | `10` | Maximum sends per window. |
 | `WHATSAPP_SEND_WINDOW_MS` | `60000` | Rate-limit window, in milliseconds. |
 | `WHATSAPP_SEND_ROOT` | `~/Downloads` + `~/.config/opencode/whatsapp-outbox` | OS-path-separated list of directories `send_media` may read from and `download_media_message` may write to. |
+| `WHATSAPP_SYNC_FULL_HISTORY` | `true` | Ask WhatsApp for the fuller history window on link. Set `false` for a lighter, recent-only sync. |
+| `WHATSAPP_HISTORY_MAX` | `20000` | Max messages kept in the persistent history store (oldest evicted). |
 
 Edit these any time in the `environment` block of the `whatsapp` server and
 restart OpenCode. The `connection_state` tool prints the effective values.
@@ -112,13 +116,41 @@ echo our own sends back through `messages.upsert`, so they are recorded on send)
   session (reclaim a stepped-aside link, or retry). See Resilience below.
 - **`connection_state`** — no input. Connection state, your JID, auth dir, QR path +
   mtime/size, send roots, allowlist, rate limit, and the last error if any.
-- **`messages_upsert`** / **`chats`** — optional `limit` (1–200, default 30). Both
-  read from an in-memory buffer populated since connect; no history backfill.
-  `recent` is capped at 200 messages, `chatMap` at 200 chats (LRU-evicted), and a
-  bounded id→raw-message map (200) backs `message_id` lookups. `messages_upsert`
-  now captures caption-less media (shown as `[image]`/`[video]`/… with the id) so
-  it can be reacted to, replied to, or downloaded, and also lists this session's
-  own sent messages (marked from `me`) so they can be edited or deleted.
+- **`messages_upsert`** — optional `limit` (1–200, default 30). Live in-memory view
+  since connect (raw buffer capped at 200; id→raw map (200) backs `message_id`
+  lookups). Captures caption-less media (`[image]`/`[video]`/…) and this session's
+  own sends (marked from `me`).
+- **`connection_state`** — no input. Connection state, your JID, auth dir, QR path +
+  mtime/size, send roots, allowlist, rate limit, history-sync mode + stored counts,
+  and the last error if any.
+
+### History & search (persistent)
+
+Backed by `historyStore.ts` — a JSON log at `whatsapp-store/history.json`, loaded
+on boot and saved debounced. Populated from the `messaging-history.set` sync on
+link and from every live/sent message. Bounded per-chat (1000) and globally
+(`WHATSAPP_HISTORY_MAX`).
+
+- **`load_messages`** — `chat` (phone/JID), `limit`, optional `before` (unix-seconds cursor to page older). Chronological, with ids.
+- **`search_messages`** — `query`, optional `chat`, `limit`. Case-insensitive substring, newest first.
+- **`chats`** — `limit`. All known chats (history + activity), most recent first.
+- **`contacts`** — `limit`. Contacts from history sync.
+- **`fetch_message_history`** — `chat`, `count`. Best-effort on-demand pull of older
+  messages via `sock.fetchMessageHistory` using the oldest stored message as the
+  cursor. WhatsApp often ignores this for linked devices; any results arrive
+  asynchronously into the store. Rate-limited.
+
+### Group management (rate-limited; most require admin)
+
+`group_create` (subject, participants[]), `group_participants_update` (jid, participants[], action: add|remove|promote|demote), `group_update` (jid, subject?/description?), `group_setting_update` (jid, setting: announcement|not_announcement|locked|unlocked), `group_invite` (jid, action: get|revoke → `chat.whatsapp.com` link), `group_accept_invite` (code/link), `group_get_invite_info` (code), `group_leave` (jid, irreversible), plus `group_metadata` / `group_fetch_all_participating` (read).
+
+### Contacts & discovery
+
+`on_whatsapp` (numbers[] → registered + JID), `update_block_status` (to, block|unblock), `fetch_blocklist`, `get_business_profile` (to), `fetch_status` (to → About text), `profile_picture_url` (to), `presence_subscribe` (to; subscribes and returns cached presence from the `presence.update` handler).
+
+### Chat & profile management
+
+`chat_modify` (to, action: mute|unmute|archive|unarchive|pin|unpin|mark_read|mark_unread|delete, `mute_hours?`; resolves the chat's last stored message for the actions that need it), `star_message` (message_id, star), `update_profile` (name?/status?), `update_profile_picture` (sandboxed image path, or `remove: true`; targets your own JID). All rate-limited; `delete`/`group_leave`/`update_block_status`/picture-remove are destructive.
 
 ## Resilience
 
@@ -145,19 +177,33 @@ echo our own sends back through `messages.upsert`, so they are recorded on send)
   `connection_state` still answers and surfaces the last error.
 - **Logging.** Baileys `warn`/`error`/`fatal` go to **stderr** (never stdout,
   which is the MCP JSON-RPC channel); `info`/`debug` are silenced.
+- **Performance/reliability tuning.** The socket sets `markOnlineOnConnect: false`
+  (so being connected doesn't mute the phone's notifications), and uses three
+  Baileys-recommended caches (via `node-cache`): `cachedGroupMetadata` (refreshed on
+  `groups.update`) so group sends don't re-fetch the participant list every time —
+  the refetch is rate-limited and a ban vector; `getMessage` (served from the raw
+  buffer) for message-retry resend and poll-vote decryption; and `msgRetryCounterCache`
+  to avoid retry loops.
+- **History caveats.** WhatsApp only syncs a **limited recent window** to a linked
+  device — the store can't hold a chat's entire archive. On-demand
+  `fetch_message_history` is **best-effort**: WhatsApp frequently drops it for
+  companion devices. Persisted history lives in `whatsapp-store/` (a sibling of the
+  auth dir), so `relink { wipe: true }` does not erase it.
 
-## Keeping the session out of git
+## Keeping the session and history out of git
 
-The linked WhatsApp session is written to `<config-dir>/whatsapp/` — a sibling of
-`mcp-whatsapp/`. Those files authenticate the account, so committing them is an
-account-takeover risk. Two things guard against it:
+The linked WhatsApp session is written to `<config-dir>/whatsapp/`, and the
+persisted chat history to `<config-dir>/whatsapp-store/` — both siblings of
+`mcp-whatsapp/`. The session authenticates the account (committing it is an
+account-takeover risk) and the history is personal message data. Two things guard
+against committing either:
 
 - `mcp-whatsapp/.gitignore` (shipped with the server) ignores its own
   `node_modules/` and `*.bak`.
-- The installer idempotently adds `whatsapp/` and `*.bak` to
+- The installer idempotently adds `whatsapp/`, `whatsapp-store/`, and `*.bak` to
   `<config-dir>/.gitignore` (creating it if absent, appending only missing lines
   under a labeled section) so a version-controlled config dir never picks up the
-  session or the installer's backups.
+  session, the message log, or the installer's backups.
 
 ## How the installer edits opencode.jsonc
 

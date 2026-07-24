@@ -120,10 +120,11 @@ async function main() {
   written.push(reg.configPath);
   if (reg.backup) backedUp.push(reg.backup);
 
-  // --- keep the account session out of git if the config dir is version-controlled ---
-  // The session lives at <target>/whatsapp/ (sibling of mcp-whatsapp) and
-  // authenticates the account, so it must never be committed.
-  const gi = ensureGitignore(targetDir, ["whatsapp/", "*.bak"]);
+  // --- keep the account session AND chat history out of git if the config dir is
+  // version-controlled --- the session at <target>/whatsapp/ authenticates the
+  // account, and <target>/whatsapp-store/ holds the persisted message log (personal
+  // data); neither must ever be committed.
+  const gi = ensureGitignore(targetDir, ["whatsapp/", "whatsapp-store/", "*.bak"]);
 
   // --- npm install (Baileys etc.) ---
   runNpmInstall(mcpDir);
@@ -165,10 +166,15 @@ async function main() {
   console.log("2b. Or ask the agent to run `login_qr` to show the QR as ASCII right in the terminal.");
   console.log("4. Ask the agent to run the `connection_state` tool -- it should report Connected: yes.");
   console.log(
-    "\nTools available to the agent: send_message, send_media, send_reaction, edit_message, delete_message,\n" +
-      "read_messages, send_presence_update, send_location, send_contact, send_poll, download_media_message,\n" +
-      "group_fetch_all_participating, group_metadata, profile_picture_url, login_qr, relink,\n" +
-      "connection_state, messages_upsert, chats.",
+    "\nTools available to the agent (41): messaging (send_message, send_media, send_reaction, edit_message,\n" +
+      "delete_message, send_location, send_contact, send_poll), history (load_messages, search_messages,\n" +
+      "fetch_message_history, messages_upsert, chats, contacts), groups (group_create,\n" +
+      "group_participants_update, group_update, group_setting_update, group_invite, group_accept_invite,\n" +
+      "group_get_invite_info, group_metadata, group_fetch_all_participating, group_leave), contacts/discovery\n" +
+      "(on_whatsapp, update_block_status, fetch_blocklist, get_business_profile, fetch_status,\n" +
+      "profile_picture_url, presence_subscribe), chat/profile (chat_modify, star_message, read_messages,\n" +
+      "send_presence_update, update_profile, update_profile_picture, download_media_message), and connection\n" +
+      "(connection_state, login_qr, relink).",
   );
   console.log("Heads up: this uses an unofficial WhatsApp library; keep send volume low to avoid bans.");
 }

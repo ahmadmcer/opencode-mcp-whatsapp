@@ -2,9 +2,9 @@
 
 An interactive installer that adds a **local WhatsApp MCP server** to your
 [OpenCode](https://opencode.ai) setup. Once linked, your agent can send and
-receive WhatsApp messages, react/reply/edit/delete, send files, locations,
-contacts and polls, download media, and inspect groups — through a set of tools
-exposed over the Model Context Protocol.
+receive WhatsApp messages, read & search chat history, react/reply/edit/delete,
+send files, locations, contacts and polls, download media, and manage groups,
+contacts, and chats — through 41 tools exposed over the Model Context Protocol.
 
 It's built on [Baileys](https://github.com/WhiskeySockets/Baileys) (an
 unofficial WhatsApp Web library) and runs entirely on your machine.
@@ -25,8 +25,8 @@ for a post-install sanity check) but not required to install.
 
 ## What it installs
 
-- `mcp-whatsapp/` — the MCP server (`index`, `store`, `messages`, `tools`,
-  `utils`, `policy`, plus unit tests), dropped into your OpenCode config dir.
+- `mcp-whatsapp/` — the MCP server (`index`, `store`, `messages`, `historyStore`,
+  `tools`, `utils`, `policy`, plus unit tests), dropped into your OpenCode config dir.
 - A `whatsapp` entry in the `mcp` block of your `opencode.jsonc`:
 
   ```json
@@ -69,23 +69,77 @@ Tool names mirror the underlying Baileys calls (snake_cased). Tools marked
 | `send_presence_update` | Send typing/recording/online/offline presence to a chat. |
 | `download_media_message` | Download a received message's media to an allowed directory (write-sandboxed). |
 
-**Discovery**
+**History & search** (persistent — survives restarts, stored under `whatsapp-store/`)
 
 | Tool | What it does |
 |---|---|
-| `group_fetch_all_participating` | List the groups this account is in. |
-| `group_metadata` | A group's subject, description, owner, and participants. |
+| `load_messages` | Read a chat's stored messages (with paging via `before`). |
+| `search_messages` | Case-insensitive substring search across stored messages. |
+| `chats` | List all known chats (from history sync + activity), most recent first. |
+| `contacts` | List contacts captured from history sync. |
+| `messages_upsert` | Live in-memory view of messages seen since connect (with ids). |
+| `fetch_message_history` | Best-effort on-demand pull of older messages (WhatsApp often ignores it for linked devices). |
+
+**Group management** (write-capable, rate-limited; most require admin)
+
+| Tool | What it does |
+|---|---|
+| `group_create` | Create a group with a subject and participants. |
+| `group_participants_update` | Add / remove / promote / demote members. |
+| `group_update` | Change a group's subject and/or description. |
+| `group_setting_update` | Announce-only / open posting, locked / unlocked info. |
+| `group_invite` | Get or revoke the group invite link. |
+| `group_accept_invite` | Join a group by invite code or link. |
+| `group_get_invite_info` | Preview a group from an invite without joining. |
+| `group_metadata` / `group_fetch_all_participating` | Inspect one group / list all groups. |
+| `group_leave` | Leave a group (irreversible). |
+
+**Contacts & discovery**
+
+| Tool | What it does |
+|---|---|
+| `on_whatsapp` | Check whether numbers are registered on WhatsApp (and get JIDs). |
+| `update_block_status` | Block or unblock a contact. |
+| `fetch_blocklist` | List blocked contacts. |
+| `get_business_profile` | Fetch a WhatsApp Business profile. |
+| `fetch_status` | A contact's About text. |
 | `profile_picture_url` | Profile-picture URL for a contact or group. |
-| `login_qr` | Show the pending linking QR as scannable ASCII, right in the TUI. |
-| `relink` | Reconnect in-process — optionally wipe the session for a fresh QR (after logout / to switch numbers), no OpenCode restart. |
-| `connection_state` | Connection state, your JID, QR path, active policy (send roots, allowlist, rate limit). |
-| `messages_upsert` | Recent inbound messages seen since the server connected (in-memory), each with an id other tools reference. |
-| `chats` | Chats seen since the server connected. |
+| `presence_subscribe` | Subscribe to and read a contact's presence. |
+
+**Chat & profile management**
+
+| Tool | What it does |
+|---|---|
+| `chat_modify` | Mute / archive / pin / mark read / delete a chat. |
+| `star_message` | Star or unstar a message. |
+| `read_messages` | Mark a received message as read. |
+| `send_presence_update` | Send typing/recording/online/offline presence. |
+| `download_media_message` | Download a received message's media (write-sandboxed). |
+| `update_profile` | Set your own name / About text. |
+| `update_profile_picture` | Set (from a sandboxed image) or remove your picture. |
+
+**Connection**
+
+| Tool | What it does |
+|---|---|
+| `login_qr` | Show the pending linking QR as scannable ASCII, in the TUI. |
+| `relink` | Reconnect in-process — optionally wipe for a fresh QR, no OpenCode restart. |
+| `connection_state` | Connection state, your JID, QR path, policy, and history stats. |
 
 Message-action tools (`send_reaction`, `edit_message`, `delete_message`,
-`read_messages`, `download_media_message`) take a `message_id` from
-`messages_upsert` — only messages seen since the server connected can be
-referenced.
+`read_messages`, `download_media_message`, `star_message`) take a `message_id`
+from `messages_upsert` or `load_messages`. Sends are gated by the recipient
+allowlist + rate limit; other mutating tools consume a rate-limit token.
+
+### Reading chat history
+
+After linking, WhatsApp syncs a **limited recent window** of history to the
+device (recent months, not the full archive). That sync plus every message seen
+afterward is stored in a persistent, searchable log under
+`~/.config/opencode/whatsapp-store/`, so `load_messages` / `search_messages` /
+`chats` work across restarts. `fetch_message_history` can *ask* for older messages
+but WhatsApp frequently ignores on-demand requests from linked devices, so treat
+it as best-effort.
 
 ## Linking your phone (one time)
 
@@ -125,11 +179,17 @@ gated:
   (`WHATSAPP_ALLOWED_RECIPIENTS`). Unset means no restriction.
 - **Send rate limit.** At most `WHATSAPP_SEND_MAX` sends per
   `WHATSAPP_SEND_WINDOW_MS` (default 10 / 60s), shared by every message-producing
-  tool (`send_message`, `send_media`, `send_reaction`, `edit_message`,
-  `delete_message`, `send_location`, `send_contact`, `send_poll`).
+  tool. Other mutating tools (group/chat/profile/block changes) also consume a
+  token, so a runaway agent loop can't spam actions.
+- **History is local & git-ignored.** The stored message log lives in
+  `~/.config/opencode/whatsapp-store/` (personal data) — the installer adds it to
+  your config dir's `.gitignore` alongside the session, so it's never committed.
+- **Your phone keeps notifying.** The server connects with
+  `markOnlineOnConnect: false`, so an agent being connected doesn't mute your
+  phone's WhatsApp notifications.
 
-All three are configurable during install and afterward via the `environment`
-block. Full detail: [`docs/REFERENCE.md`](docs/REFERENCE.md).
+These are configurable during install and afterward via the `environment` block.
+Full detail: [`docs/REFERENCE.md`](docs/REFERENCE.md).
 
 ## What it does NOT do
 
