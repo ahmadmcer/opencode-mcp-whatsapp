@@ -37,8 +37,10 @@ let sock: WASocket | null = null
 let connected = false
 let meJid: string | null = null
 let lastError: string | null = null
+let lastQr: string | null = null
 let reconnectAttempts = 0
 let reconnecting = false
+let steppedAside = false
 
 export function getSocket(): WASocket | null {
   return sock
@@ -57,6 +59,16 @@ export function getAuthDir() {
 }
 export function getLastError() {
   return lastError
+}
+// The most recent QR string emitted by Baileys, or null once linked. Powers the
+// `login_qr` tool so the code can be rendered inline in the OpenCode TUI.
+export function getLastQr() {
+  return lastQr
+}
+// True when this instance deliberately gave up the connection because another
+// OpenCode session / linked device took it over (see connectionReplaced below).
+export function hasSteppedAside() {
+  return steppedAside
 }
 // Exposed for downloadMediaMessage, which needs a logger and the socket's own
 // updateMediaMessage (reachable via getSocket().updateMediaMessage) as its
@@ -131,9 +143,11 @@ export async function initConnection() {
   sock.ev.on("connection.update", (u: any) => {
     const { connection, qr, lastDisconnect } = u
     if (qr) {
+      // Keep the raw string in memory (for `login_qr`) as well as the PNG.
+      lastQr = qr
       QRCode.toBuffer(qr, { type: "png", width: 512, margin: 2 })
         .then((png) => writeFile(QR_FILE, png))
-        .then(() => log(`QR written to ${QR_FILE} — scan it in WhatsApp > Linked Devices`))
+        .then(() => log(`QR ready — run the login_qr tool, or open ${QR_FILE}`))
         .catch((e) => {
           lastError = `QR write failed: ${(e as Error).message}`
           log(lastError)
@@ -141,8 +155,10 @@ export async function initConnection() {
     }
     if (connection === "open") {
       connected = true
+      steppedAside = false
       meJid = sock?.user?.id ?? null
       lastError = null
+      lastQr = null
       reconnectAttempts = 0
       log(`connected as ${meJid}`)
     }
@@ -153,6 +169,21 @@ export async function initConnection() {
       if (code === DisconnectReason.loggedOut) {
         // Terminal: creds are dead. Reconnecting would loop forever.
         lastError = `Logged out. Delete ${AUTH_DIR} and re-link by scanning a fresh QR.`
+        log(lastError)
+        return
+      }
+      if (code === DisconnectReason.connectionReplaced) {
+        // Another OpenCode session (or linked device) connected with the same
+        // credentials and took the socket. Reconnecting here would reclaim it and
+        // kick the other instance, which reclaims it back — a ping-pong that
+        // WhatsApp eventually flags and that invalidates the session, forcing a new
+        // QR. Step aside instead: the newest session owns the link. Restart this
+        // one to reclaim it deliberately.
+        steppedAside = true
+        lastError =
+          "Another OpenCode session or linked device took over this WhatsApp connection. " +
+          "This instance stepped aside to avoid a reconnect loop (which is what used to force a re-scan). " +
+          "Restart this session if you want it to reclaim the link."
         log(lastError)
         return
       }

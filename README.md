@@ -76,6 +76,7 @@ Tool names mirror the underlying Baileys calls (snake_cased). Tools marked
 | `group_fetch_all_participating` | List the groups this account is in. |
 | `group_metadata` | A group's subject, description, owner, and participants. |
 | `profile_picture_url` | Profile-picture URL for a contact or group. |
+| `login_qr` | Show the pending linking QR as scannable ASCII, right in the TUI. |
 | `connection_state` | Connection state, your JID, QR path, active policy (send roots, allowlist, rate limit). |
 | `messages_upsert` | Recent inbound messages seen since the server connected (in-memory), each with an id other tools reference. |
 | `chats` | Chats seen since the server connected. |
@@ -88,11 +89,20 @@ referenced.
 ## Linking your phone (one time)
 
 1. Start (or restart) `opencode` so the server connects.
-2. It writes a QR image to `~/.config/opencode/whatsapp/qr.png`.
-3. Open that PNG and scan it in **WhatsApp → Settings → Linked Devices → Link a device**.
+2. Ask the agent to run **`login_qr`** — it prints the QR as scannable ASCII right
+   in the TUI. (It's also saved as an image at `~/.config/opencode/whatsapp/qr.png`.)
+3. Scan it in **WhatsApp → Settings → Linked Devices → Link a device**. The code
+   refreshes periodically — re-run `login_qr` if it expires.
 4. Ask the agent to run `connection_state` — it should report `Connected: yes`.
 
 The session is cached, so you only scan once. Reconnects are automatic.
+
+**Running more than one session at a time?** Each `opencode` process launches its
+own copy of the server, and WhatsApp only allows one live socket per link. When a
+newer session connects, older ones now **step aside** instead of fighting to
+reclaim the link — the previous behavior (a reconnect ping-pong) was what
+occasionally invalidated the session and forced a fresh QR scan. The newest
+session owns the connection; restart an older one if you want it to reclaim it.
 
 ## Safety model
 

@@ -6,7 +6,7 @@ Baileys-flavored tools: `send_message`, `send_media`, `send_reaction`,
 `edit_message`, `delete_message`, `read_messages`, `send_presence_update`,
 `send_location`, `send_contact`, `send_poll`, `download_media_message`,
 `group_fetch_all_participating`, `group_metadata`, `profile_picture_url`,
-`connection_state`, `messages_upsert`, `chats`.
+`login_qr`, `connection_state`, `messages_upsert`, `chats`.
 
 This folder is installed by
 [`opencode-mcp-whatsapp`](https://github.com/ahmadmcer/opencode-mcp-whatsapp).
@@ -15,13 +15,15 @@ You normally don't run anything here by hand — OpenCode launches it via the
 
 ## Linking your phone
 
-1. Start OpenCode (or restart it) so the server connects. On first run it writes
-   a QR image to `../whatsapp/qr.png` (i.e. `~/.config/opencode/whatsapp/qr.png`).
-2. Open that PNG and scan it in **WhatsApp → Settings → Linked Devices → Link a
-   device**.
+1. Start OpenCode (or restart it) so the server connects.
+2. Ask the agent to run **`login_qr`** to print the QR as ASCII in the TUI (also
+   written to `../whatsapp/qr.png`), and scan it in **WhatsApp → Settings → Linked
+   Devices → Link a device**.
 3. Ask the agent to run the `connection_state` tool to confirm `Connected: yes`.
 
 The session is cached under `~/.config/opencode/whatsapp/`, so you only scan once.
+If a newer OpenCode session takes over the link, older ones step aside rather than
+fighting for it (which used to force a re-scan); restart one to reclaim the link.
 
 ## Configuration (environment variables)
 

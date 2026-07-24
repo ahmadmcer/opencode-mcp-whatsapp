@@ -102,6 +102,9 @@ echo our own sends back through `messages.upsert`, so they are recorded on send)
   with admin flags.
 - **`profile_picture_url`** — `to`. Returns the picture URL, or a friendly message
   when none is set / not visible.
+- **`login_qr`** — no input. Renders the pending linking QR as scannable ASCII in
+  the terminal (via `qrcode-terminal`). Returns "already connected" when linked, or
+  guidance when no QR is pending yet. The raw QR is also written to `qr.png`.
 - **`connection_state`** — no input. Connection state, your JID, auth dir, QR path +
   mtime/size, send roots, allowlist, rate limit, and the last error if any.
 - **`messages_upsert`** / **`chats`** — optional `limit` (1–200, default 30). Both
@@ -117,6 +120,15 @@ echo our own sends back through `messages.upsert`, so they are recorded on send)
 - **Reconnection.** On a dropped socket the server reconnects with exponential
   backoff (1s → 30s cap), resetting on a successful open. A `loggedOut` close is
   terminal — it tells you to delete the auth dir and re-link rather than looping.
+- **Multiple instances / `connectionReplaced`.** Every `opencode` process starts
+  its own server, but WhatsApp permits only one live socket per link. When a newer
+  session connects, the older socket receives a `connectionReplaced` (440) close.
+  The server treats this as terminal and **steps aside** instead of reconnecting —
+  reconnecting would reclaim the link and kick the newer session, a ping-pong that
+  WhatsApp flags and that used to invalidate the session and force a fresh QR.
+  `connection_state` reports the step-aside; restart that instance to reclaim the
+  link. The linked session on disk is untouched, so a normal cold start reuses it
+  (no re-scan).
 - **Startup decoupling.** The MCP transport comes up first; WhatsApp connects in
   the background. WhatsApp being down never makes the MCP itself unavailable —
   `connection_state` still answers and surfaces the last error.

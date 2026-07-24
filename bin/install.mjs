@@ -162,11 +162,13 @@ async function main() {
   console.log("1. Start (or restart) opencode so the whatsapp server connects.");
   console.log(`2. It writes a QR image to: ${path.join(targetDir, "whatsapp", "qr.png")}`);
   console.log("3. Open that PNG and scan it in WhatsApp > Settings > Linked Devices > Link a device.");
+  console.log("2b. Or ask the agent to run `login_qr` to show the QR as ASCII right in the terminal.");
   console.log("4. Ask the agent to run the `connection_state` tool -- it should report Connected: yes.");
   console.log(
     "\nTools available to the agent: send_message, send_media, send_reaction, edit_message, delete_message,\n" +
       "read_messages, send_presence_update, send_location, send_contact, send_poll, download_media_message,\n" +
-      "group_fetch_all_participating, group_metadata, profile_picture_url, connection_state, messages_upsert, chats.",
+      "group_fetch_all_participating, group_metadata, profile_picture_url, login_qr, connection_state,\n" +
+      "messages_upsert, chats.",
   );
   console.log("Heads up: this uses an unofficial WhatsApp library; keep send volume low to avoid bans.");
 }

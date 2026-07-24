@@ -1,11 +1,21 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { z } from "zod"
 import { downloadMediaMessage } from "@whiskeysockets/baileys"
+import qrcodeTerminal from "qrcode-terminal"
 import { readFile, writeFile, stat } from "node:fs/promises"
 import { existsSync, mkdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, delimiter } from "node:path"
-import { getSocket, isConnected, getMyJid, getQrPath, getAuthDir, getLastError, getLogger } from "./store.js"
+import {
+  getSocket,
+  isConnected,
+  getMyJid,
+  getQrPath,
+  getAuthDir,
+  getLastError,
+  getLogger,
+  getLastQr,
+} from "./store.js"
 import { getRecent, getChats, getMessageById, recordOutgoing, type ResolvedMessage } from "./messages.js"
 import { toJid, filenameOf, resolveWithinRoots, isInside, buildVcard } from "./utils.js"
 import { isRecipientAllowed, allowedRecipients, sendLimiter, rateLimitConfig } from "./policy.js"
@@ -44,10 +54,20 @@ function okText(text: string) {
 
 function notConnected() {
   const last = getLastError() ? ` Last error: ${getLastError()}` : ""
+  const qrHint = getLastQr() ? " A QR is pending — run the login_qr tool to display it here and scan it." : ""
   return errText(
-    `Not connected. If the QR at ${getQrPath()} is fresh, scan it in WhatsApp > Settings > Linked Devices. ` +
+    `Not connected.${qrHint} Otherwise the QR at ${getQrPath()} can be scanned in WhatsApp > Settings > Linked Devices. ` +
       `If linking keeps failing, WhatsApp may be rate-limiting your account — wait 1+ hour.${last}`,
   )
+}
+
+// Render a QR string as compact terminal ASCII so it can be scanned straight from
+// the OpenCode TUI. qrcode-terminal's callback fires synchronously, wrapped here
+// as a promise for a clean await.
+function renderQrAscii(qr: string): Promise<string> {
+  return new Promise((resolve) => {
+    ;(qrcodeTerminal as any).generate(qr, { small: true }, (ascii: string) => resolve(ascii))
+  })
 }
 
 // Returns an error result if the recipient is off the allowlist, else null.
@@ -600,6 +620,33 @@ export function registerTools(server: McpServer) {
     },
   )
 
+  // --- login_qr -----------------------------------------------------------
+  server.registerTool(
+    "login_qr",
+    {
+      title: "Show login QR code",
+      description:
+        "Display the pending WhatsApp linking QR as scannable ASCII, right here in the terminal. Use this when connection_state reports not connected. Scan it in WhatsApp > Settings > Linked Devices > Link a device.",
+      inputSchema: {},
+    },
+    async () => {
+      if (isConnected()) return okText(`Already connected as ${getMyJid()}. No QR needed.`)
+      const qr = getLastQr()
+      if (!qr) {
+        const last = getLastError() ? `\nLast error: ${getLastError()}` : ""
+        return okText(
+          `No QR pending right now. The server may still be starting or reconnecting — wait a few seconds and try again. ` +
+            `A QR only appears when WhatsApp wants a fresh link; if you were linked before, it should reconnect on its own.${last}`,
+        )
+      }
+      const ascii = await renderQrAscii(qr)
+      return okText(
+        `Scan this in WhatsApp > Settings > Linked Devices > Link a device:\n\n${ascii}\n` +
+          `(Also saved as an image at ${getQrPath()}. The code refreshes periodically — re-run login_qr if it expires.)`,
+      )
+    },
+  )
+
   // --- connection_state (was `status`) ------------------------------------
   server.registerTool(
     "connection_state",
@@ -626,7 +673,11 @@ export function registerTools(server: McpServer) {
       if (getLastError()) lines.push(`Last error: ${getLastError()}`)
       if (!isConnected()) {
         lines.push("")
-        lines.push("To link: open the QR file above and scan with WhatsApp > Settings > Linked Devices.")
+        if (getLastQr()) {
+          lines.push("A QR is pending — run the login_qr tool to display it here, or open the QR file above.")
+        } else {
+          lines.push("To link: run login_qr (or open the QR file above) and scan with WhatsApp > Settings > Linked Devices.")
+        }
         lines.push(
           "If the link fails with 'Try again later', your WhatsApp account is rate-limited at the server. The MCP cannot bypass that — wait 1+ hour and try again.",
         )
