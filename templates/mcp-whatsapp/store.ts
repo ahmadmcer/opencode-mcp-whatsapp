@@ -174,7 +174,11 @@ export async function initConnection() {
     },
     printQRInTerminal: false,
     logger,
-    browser: ["Windows", "Chrome", "131.0.0.0"],
+    // [client, browser, version]. The first element is what WhatsApp shows in
+    // Settings > Linked Devices, so it's set to "OpenCode" to be recognizable;
+    // the browser stays a real value (Chrome) so pairing behaves normally. The
+    // name is baked in at pairing time — changing it only affects a fresh link.
+    browser: ["OpenCode", "Chrome", "131.0.0.0"],
     syncFullHistory: false,
     generateHighQualityLinkPreview: false,
   })

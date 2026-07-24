@@ -1,6 +1,6 @@
 {
   "name": "opencode-mcp-whatsapp",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Interactive installer that adds a local WhatsApp MCP server (send/receive messages, files, chats via Baileys) to an OpenCode setup",
   "license": "MIT",
   "type": "module",

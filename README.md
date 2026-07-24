@@ -96,7 +96,9 @@ referenced.
    refreshes periodically — re-run `login_qr` if it expires.
 4. Ask the agent to run `connection_state` — it should report `Connected: yes`.
 
-The session is cached, so you only scan once. Reconnects are automatic.
+The session is cached, so you only scan once. Reconnects are automatic. The linked
+device shows up as **OpenCode** in WhatsApp → Settings → Linked Devices, so it's
+easy to spot (and revoke) among your other sessions.
 
 **Running more than one session at a time?** Each `opencode` process launches its
 own copy of the server, and WhatsApp only allows one live socket per link. When a
