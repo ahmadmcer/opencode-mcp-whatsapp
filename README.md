@@ -1,5 +1,11 @@
 # opencode-mcp-whatsapp
 
+[![Release](https://img.shields.io/github/v/release/ahmadmcer/opencode-mcp-whatsapp?label=release&color=25D366)](https://github.com/ahmadmcer/opencode-mcp-whatsapp/releases/latest)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%E2%89%A518-brightgreen.svg)](package.json)
+[![Tools](https://img.shields.io/badge/tools-41-8A2BE2.svg)](docs/REFERENCE.md)
+[![Built on Baileys](https://img.shields.io/badge/built%20on-Baileys-25D366.svg)](https://github.com/WhiskeySockets/Baileys)
+
 An interactive installer that adds a **local WhatsApp MCP server** to your
 [OpenCode](https://opencode.ai) setup. Once linked, your agent can send and
 receive WhatsApp messages, read & search chat history, react/reply/edit/delete,
