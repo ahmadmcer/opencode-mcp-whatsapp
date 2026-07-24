@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { startConnection } from "./store.js"
 import { registerTools } from "./tools.js"
 
-const server = new McpServer({ name: "whatsapp", version: "1.1.0" })
+const server = new McpServer({ name: "whatsapp", version: "1.2.0" })
 registerTools(server)
 
 // Bring the MCP transport up first so tools (including `connection_state`) are
