@@ -5,7 +5,7 @@ import { registerTools } from "./tools.js"
 import { registerResources } from "./resources.js"
 import { load as loadHistory, flush as flushHistory } from "./historyStore.js"
 
-const server = new McpServer({ name: "whatsapp", version: "1.3.1" })
+const server = new McpServer({ name: "whatsapp", version: "1.3.2" })
 registerTools(server)
 registerResources(server)
 

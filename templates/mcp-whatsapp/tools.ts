@@ -106,6 +106,22 @@ function sendGuard(jid: string) {
   return recipientDenied(jid) ?? rateLimited()
 }
 
+// Bare phone/user part of a JID, ignoring the device suffix (…:NN) and domain,
+// so an own-JID comparison works regardless of how WhatsApp formats it.
+function barePart(jid: string | null | undefined) {
+  return (jid ?? "").split("@")[0].split(":")[0]
+}
+
+// Turn WhatsApp's raw invite errors (bad-request/not-authorized/…) into a plain
+// message; other errors pass through with the given prefix.
+function inviteError(prefix: string, e: unknown) {
+  const msg = (e as Error).message
+  if (/not-authorized|bad-request|gone|404|not-acceptable|invalid|resource-not-found/i.test(msg)) {
+    return errText(`Invite link is invalid or expired — the group may be empty or full, or the link was revoked. (${msg})`)
+  }
+  return errText(`${prefix}: ${msg}`)
+}
+
 // Resolve an agent-supplied message id to its stored key/raw message, or an error
 // result telling it to list messages first. Returns a discriminated tuple.
 function resolveMsg(messageId: string): { msg: ResolvedMessage } | { err: ReturnType<typeof errText> } {
@@ -1056,7 +1072,7 @@ export function registerTools(server: McpServer) {
         const jid = await s.groupAcceptInvite(c)
         return okText(`Joined group ${jid ?? "(unknown)"}.`)
       } catch (e) {
-        return errText(`Join failed: ${(e as Error).message}`)
+        return inviteError("Join failed", e)
       }
     },
   )
@@ -1078,7 +1094,7 @@ export function registerTools(server: McpServer) {
         const g: any = await s.groupGetInviteInfo(c)
         return okText(`${g.subject ?? "(no subject)"} (${g.id}) — ${g.size ?? g.participants?.length ?? "?"} members`)
       } catch (e) {
-        return errText(`Lookup failed: ${(e as Error).message}`)
+        return inviteError("Lookup failed", e)
       }
     },
   )
@@ -1156,6 +1172,9 @@ export function registerTools(server: McpServer) {
         jid = toJid(to)
       } catch (e) {
         return errText(`Error: ${(e as Error).message}`)
+      }
+      if (barePart(jid) === barePart(getMyJid())) {
+        return errText("Can't block your own number.")
       }
       const limited = rateLimited()
       if (limited) return limited
