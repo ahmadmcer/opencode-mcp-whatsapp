@@ -1,0 +1,4 @@
+node_modules/
+# Never commit a linked WhatsApp session or QR (they authenticate an account)
+whatsapp/
+*.bak
