@@ -97,13 +97,7 @@ export function handleUpsert(evt: any) {
     })
     if (recent.length > MAX_RECENT) recent.shift()
 
-    if (id) {
-      rawById.set(id, m)
-      if (rawById.size > MAX_RAW) {
-        const oldest = rawById.keys().next().value
-        if (oldest !== undefined) rawById.delete(oldest)
-      }
-    }
+    rememberRaw(id, m)
 
     const cur = chatMap.get(from) ?? { jid: from, name: m.pushName ?? from, lastTs: 0, lastBody: "" }
     const ts = Number(m.messageTimestamp ?? 0)
@@ -115,6 +109,40 @@ export function handleUpsert(evt: any) {
     chatMap.set(from, cur)
     evictOldestChat()
   }
+}
+
+// Store a raw message under its id for later key lookup, FIFO-bounded so a
+// long-lived session can't grow the map without limit.
+function rememberRaw(id: string, raw: any) {
+  if (!id) return
+  rawById.set(id, raw)
+  if (rawById.size > MAX_RAW) {
+    const oldest = rawById.keys().next().value
+    if (oldest !== undefined) rawById.delete(oldest)
+  }
+}
+
+// Record a message this session just sent so the action tools (edit / delete /
+// react / reply) can reference it by the id that the send_* tools return.
+// Baileys does not surface our own sends via messages.upsert, so we register them
+// explicitly here. `summary` is a short display body for messages_upsert.
+export function recordOutgoing(sent: any, summary: string, mediaType?: MediaType) {
+  const id = sent?.key?.id
+  if (!id) return
+  const jid = sent.key.remoteJid ?? "unknown"
+  recent.push({
+    ts: Number(sent.messageTimestamp ?? Math.floor(Date.now() / 1000)),
+    from: jid,
+    fromName: "me",
+    body: summary,
+    fromMe: true,
+    id,
+    chatJid: jid,
+    mediaType,
+    key: sent.key,
+  })
+  if (recent.length > MAX_RECENT) recent.shift()
+  rememberRaw(id, sent)
 }
 
 // Bound chatMap so a long-lived session that touches many chats can't grow

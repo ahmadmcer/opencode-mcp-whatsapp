@@ -56,7 +56,11 @@ restart OpenCode. The `connection_state` tool prints the effective values.
 Tool names mirror the Baileys calls behind them (snake_cased). Tools flagged
 **[gated]** run the recipient allowlist and consume a shared send-rate-limit token
 before sending. Message-action tools take a `message_id` from `messages_upsert`;
-only messages seen since the server connected can be referenced (in-memory).
+only messages seen since the server connected can be referenced (in-memory). This
+includes the session's **own** sent messages: each successful send records its
+result into the same buffer, so `edit_message` / `delete_message` / `send_reaction`
+and `quoted_message_id` can target a message the MCP just sent (Baileys does not
+echo our own sends back through `messages.upsert`, so they are recorded on send).
 
 ### Messaging
 
@@ -105,7 +109,8 @@ only messages seen since the server connected can be referenced (in-memory).
   `recent` is capped at 200 messages, `chatMap` at 200 chats (LRU-evicted), and a
   bounded id→raw-message map (200) backs `message_id` lookups. `messages_upsert`
   now captures caption-less media (shown as `[image]`/`[video]`/… with the id) so
-  it can be reacted to, replied to, or downloaded.
+  it can be reacted to, replied to, or downloaded, and also lists this session's
+  own sent messages (marked from `me`) so they can be edited or deleted.
 
 ## Resilience
 

@@ -6,7 +6,7 @@ import { existsSync, mkdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { join, delimiter } from "node:path"
 import { getSocket, isConnected, getMyJid, getQrPath, getAuthDir, getLastError, getLogger } from "./store.js"
-import { getRecent, getChats, getMessageById, type ResolvedMessage } from "./messages.js"
+import { getRecent, getChats, getMessageById, recordOutgoing, type ResolvedMessage } from "./messages.js"
 import { toJid, filenameOf, resolveWithinRoots, isInside, buildVcard } from "./utils.js"
 import { isRecipientAllowed, allowedRecipients, sendLimiter, rateLimitConfig } from "./policy.js"
 
@@ -122,6 +122,7 @@ export function registerTools(server: McpServer) {
       if (guard) return guard
       try {
         const sent = await s.sendMessage(jid, { text: message }, quoted ? { quoted } : undefined)
+        recordOutgoing(sent, message)
         return okText(`Sent to ${jid} (id: ${sent?.key?.id ?? "?"})`)
       } catch (e) {
         return errText(`Send failed: ${(e as Error).message}`)
@@ -178,16 +179,20 @@ export function registerTools(server: McpServer) {
       }
 
       const ext = filenameOf(safePath).toLowerCase().split(".").pop() ?? ""
-      const content = IMAGE_EXT.includes(ext)
-        ? { image: buffer }
-        : VIDEO_EXT.includes(ext)
-          ? { video: buffer }
-          : { document: buffer, fileName: filenameOf(safePath) }
+      const name = filenameOf(safePath)
+      const mediaType = IMAGE_EXT.includes(ext) ? "image" : VIDEO_EXT.includes(ext) ? "video" : "document"
+      const content =
+        mediaType === "image"
+          ? { image: buffer }
+          : mediaType === "video"
+            ? { video: buffer }
+            : { document: buffer, fileName: name }
 
       const guard = sendGuard(jid)
       if (guard) return guard
       try {
         const sent = await s.sendMessage(jid, content as any, quoted ? { quoted } : undefined)
+        recordOutgoing(sent, `[${mediaType}] ${name}`, mediaType)
         return okText(`Sent ${safePath} to ${jid} (id: ${sent?.key?.id ?? "?"})`)
       } catch (e) {
         return errText(`Send failed: ${(e as Error).message}`)
@@ -368,6 +373,7 @@ export function registerTools(server: McpServer) {
         const sent = await s.sendMessage(jid, {
           location: { degreesLatitude: latitude, degreesLongitude: longitude, name, address },
         })
+        recordOutgoing(sent, `[location] ${latitude},${longitude}`)
         return okText(`Location sent to ${jid} (id: ${sent?.key?.id ?? "?"})`)
       } catch (e) {
         return errText(`Send failed: ${(e as Error).message}`)
@@ -405,6 +411,7 @@ export function registerTools(server: McpServer) {
         const sent = await s.sendMessage(jid, {
           contacts: { displayName: contact_name, contacts: [{ vcard }] },
         })
+        recordOutgoing(sent, `[contact] ${contact_name}`)
         return okText(`Contact sent to ${jid} (id: ${sent?.key?.id ?? "?"})`)
       } catch (e) {
         return errText(`Send failed: ${(e as Error).message}`)
@@ -440,6 +447,7 @@ export function registerTools(server: McpServer) {
       const selectableCount = Math.min(selectable_count ?? 1, options.length)
       try {
         const sent = await s.sendMessage(jid, { poll: { name, values: options, selectableCount } })
+        recordOutgoing(sent, `[poll] ${name}`)
         return okText(`Poll sent to ${jid} (id: ${sent?.key?.id ?? "?"})`)
       } catch (e) {
         return errText(`Send failed: ${(e as Error).message}`)

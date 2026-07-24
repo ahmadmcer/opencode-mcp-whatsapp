@@ -1,6 +1,6 @@
 import test from "node:test"
 import assert from "node:assert/strict"
-import { handleUpsert, getRecent, getMessageById } from "./messages.js"
+import { handleUpsert, getRecent, getMessageById, recordOutgoing } from "./messages.js"
 
 // Build a synthetic Baileys "notify" upsert event for one message.
 function notify(msg: any) {
@@ -58,6 +58,28 @@ test("getMessageById returns the stored key and raw message", () => {
 
 test("getMessageById returns null for an unknown id", () => {
   assert.equal(getMessageById("NOPE"), null)
+})
+
+test("recordOutgoing makes a sent message resolvable for edit/delete/react", () => {
+  const sent = {
+    key: { remoteJid: "444@s.whatsapp.net", id: "OUT_1", fromMe: true },
+    message: { conversation: "hi there" },
+    messageTimestamp: 5000,
+  }
+  recordOutgoing(sent, "hi there")
+  const resolved = getMessageById("OUT_1")
+  assert.ok(resolved, "an outgoing message should be resolvable by its send id")
+  assert.equal(resolved!.key.fromMe, true)
+  assert.equal(resolved!.chatJid, "444@s.whatsapp.net")
+  // It should also surface in the recent list, marked as ours.
+  const inRecent = getRecent(50).find((m) => m.id === "OUT_1")
+  assert.equal(inRecent!.fromMe, true)
+  assert.equal(inRecent!.body, "hi there")
+})
+
+test("recordOutgoing ignores a send result with no id", () => {
+  recordOutgoing({ key: {} }, "nope")
+  assert.equal(getRecent(200).find((m) => m.body === "nope"), undefined)
 })
 
 test("the raw-message map is bounded (oldest ages out past the cap)", () => {
