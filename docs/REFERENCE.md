@@ -13,6 +13,7 @@ Everything the installer sets up, and why it's shaped this way.
 │   ├── messages.ts         # live in-memory ingestion (raw buffer for action tools)
 │   ├── historyStore.ts     # persistent, searchable message log (JSON)
 │   ├── tools.ts            # the MCP tools + policy enforcement
+│   ├── resources.ts        # read-only MCP resources (connection, chats, history)
 │   ├── policy.ts           # recipient allowlist + send rate limiter
 │   ├── utils.ts            # pure helpers (JID parsing, path sandbox)
 │   ├── *.test.ts           # unit tests (run with `npm test`)
@@ -151,6 +152,20 @@ link and from every live/sent message. Bounded per-chat (1000) and globally
 ### Chat & profile management
 
 `chat_modify` (to, action: mute|unmute|archive|unarchive|pin|unpin|mark_read|mark_unread|delete, `mute_hours?`; resolves the chat's last stored message for the actions that need it), `star_message` (message_id, star), `update_profile` (name?/status?), `update_profile_picture` (sandboxed image path, or `remove: true`; targets your own JID). All rate-limited; `delete`/`group_leave`/`update_block_status`/picture-remove are destructive.
+
+## Resources
+
+Separate from tools, `resources.ts` registers read-only **MCP resources** (which
+declares the `resources` capability, so `list_mcp_resources` works). A client can
+list and read these by URI to pull state into context without invoking a tool:
+
+- `whatsapp://connection` — connection status, JID, history-sync mode, counts.
+- `whatsapp://chats` — known chats (JSON).
+- `whatsapp://contacts` — contacts from history sync.
+- `whatsapp://messages/recent` — live messages since connect.
+- `whatsapp://chat/{jid}` — templated per-chat history; the template's list callback
+  enumerates known chats, and reading returns up to 200 stored messages for that
+  chat (the `{jid}` may be a phone number or a full JID).
 
 ## Resilience
 

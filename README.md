@@ -26,7 +26,8 @@ for a post-install sanity check) but not required to install.
 ## What it installs
 
 - `mcp-whatsapp/` — the MCP server (`index`, `store`, `messages`, `historyStore`,
-  `tools`, `utils`, `policy`, plus unit tests), dropped into your OpenCode config dir.
+  `tools`, `resources`, `utils`, `policy`, plus unit tests), dropped into your
+  OpenCode config dir.
 - A `whatsapp` entry in the `mcp` block of your `opencode.jsonc`:
 
   ```json
@@ -140,6 +141,20 @@ afterward is stored in a persistent, searchable log under
 `chats` work across restarts. `fetch_message_history` can *ask* for older messages
 but WhatsApp frequently ignores on-demand requests from linked devices, so treat
 it as best-effort.
+
+### Resources
+
+Besides tools, the server exposes read-only **MCP resources** (browsable via
+`list_mcp_resources` / readable by URI), so a client can pull WhatsApp state into
+context without a tool call:
+
+| URI | Contents |
+|---|---|
+| `whatsapp://connection` | Connection status, your JID, history-sync mode, stored counts. |
+| `whatsapp://chats` | Known chats, most recent first. |
+| `whatsapp://contacts` | Contacts from history sync. |
+| `whatsapp://messages/recent` | Live messages seen since connect. |
+| `whatsapp://chat/{jid}` | Stored history for one chat (templated; the chat list enumerates them). |
 
 ## Linking your phone (one time)
 

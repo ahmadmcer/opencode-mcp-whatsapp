@@ -2,10 +2,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js"
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { startConnection } from "./store.js"
 import { registerTools } from "./tools.js"
+import { registerResources } from "./resources.js"
 import { load as loadHistory, flush as flushHistory } from "./historyStore.js"
 
-const server = new McpServer({ name: "whatsapp", version: "1.3.0" })
+const server = new McpServer({ name: "whatsapp", version: "1.3.1" })
 registerTools(server)
+registerResources(server)
 
 // Load persisted chat history before connecting, so tools can read past chats
 // immediately and history-sync merges into what's already on disk.
