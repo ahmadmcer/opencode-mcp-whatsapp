@@ -68,50 +68,96 @@ function intEnv(name: string, def: number): number {
   return Number.isFinite(v) && v > 0 ? Math.floor(v) : def
 }
 
-// Like intEnv but allows 0 (used to *disable* the pacer).
-function intEnvNonNeg(name: string, def: number): number {
-  const v = Number(process.env[name])
-  return Number.isFinite(v) && v >= 0 ? Math.floor(v) : def
-}
-
-// Default lowered from 10 to 5 — heavy automation on a real number is what trips
-// WhatsApp's anti-spam restrictions on linked devices.
-const RATE_MAX = intEnv("WHATSAPP_SEND_MAX", 5)
+const RATE_MAX = intEnv("WHATSAPP_SEND_MAX", 10)
 const RATE_WINDOW_MS = intEnv("WHATSAPP_SEND_WINDOW_MS", 60_000)
+// Per-recipient cap on top of the global rate limit. Defends against agent
+// loops that reply to the same person repeatedly.
+const RECIPIENT_MAX = intEnv("WHATSAPP_SEND_MAX_PER_RECIPIENT", 3)
+const RECIPIENT_WINDOW_MS = intEnv("WHATSAPP_SEND_RECIPIENT_WINDOW_MS", 60_000)
+// Minimum gap between outbound sends, in ms. Smooths burst-then-wait that
+// WhatsApp's anti-spam heuristic flags. 1000ms matches whatsapp-persona-bot
+// defaults; set 0 to disable. Initialized to "now" so the very first send is
+// not artificially slowed.
+const PACER_DELAY_MS = intEnv("WHATSAPP_PACER_DELAY_MS", 1000)
 
 export function rateLimitConfig() {
   return { max: RATE_MAX, windowMs: RATE_WINDOW_MS }
 }
 
+export function pacerConfig() {
+  return { delayMs: PACER_DELAY_MS }
+}
+
 export const sendLimiter = createRateLimiter(RATE_MAX, RATE_WINDOW_MS)
 
-// --- Global action pacer -------------------------------------------------
+// --- Per-recipient rate limiter ------------------------------------------
 //
-// A minimum gap between *any* two WhatsApp operations (not just sends). Bursts of
-// rapid calls — even reads like onWhatsApp / group lookups — look automated and
-// help trip account restrictions, so every socket call is serialized through this
-// and spaced out. Set WHATSAPP_MIN_ACTION_GAP_MS=0 to disable.
+// A single global limiter is not enough: an agent loop that gets stuck
+// replying to one person could spend the whole window's budget on them and
+// still look fine. A per-jid cap catches that pattern. Different jids do not
+// affect each other, and the global limiter still applies on top.
+//
+// Limiters are created lazily so a session that never chats with a particular
+// jid costs nothing. A bounded LRU map evicts oldest when we hit
+// RECIPIENT_LIMITS_MAX entries, so memory stays predictable for long-running
+// agents that touch many contacts.
+const RECIPIENT_LIMITS_MAX = 500
 
-/** Returns a `pace()` that resolves at least `gapMs` after the previous one.
- *  Calls are serialized (chained), so concurrent tool calls queue rather than race. */
-export function createPacer(gapMs: number) {
-  let lastAt = 0
-  let chain: Promise<void> = Promise.resolve()
-  return function pace(): Promise<void> {
-    if (gapMs <= 0) return Promise.resolve()
-    const next = chain.then(async () => {
-      const wait = lastAt + gapMs - Date.now()
-      if (wait > 0) await new Promise((r) => setTimeout(r, wait))
-      lastAt = Date.now()
-    })
-    chain = next.catch(() => {})
-    return next
+const recipientLimiters = new Map<string, ReturnType<typeof createRateLimiter>>()
+
+export function getRecipientLimiter(jid: string): ReturnType<typeof createRateLimiter> {
+  let lim = recipientLimiters.get(jid)
+  if (!lim) {
+    lim = createRateLimiter(RECIPIENT_MAX, RECIPIENT_WINDOW_MS)
+    recipientLimiters.set(jid, lim)
+    if (recipientLimiters.size > RECIPIENT_LIMITS_MAX) {
+      // Map iteration order = insertion order; delete the oldest entry.
+      const oldest = recipientLimiters.keys().next().value
+      if (oldest !== undefined) recipientLimiters.delete(oldest)
+    }
+  }
+  return lim
+}
+
+/** Test helper: forget all per-recipient state. */
+export function resetRecipientLimiters() {
+  recipientLimiters.clear()
+}
+
+export type RecipientRateResult = { ok: true } | { ok: false; retryAfterMs: number }
+
+/** Pure check, no side effects — lets tests assert deterministic behaviour. */
+export function checkRecipientLimit(jid: string, now: number = Date.now()): RecipientRateResult {
+  const lim = getRecipientLimiter(jid)
+  return lim.check(now) as RecipientRateResult
+}
+
+export function recipientLimitConfig() {
+  return { max: RECIPIENT_MAX, windowMs: RECIPIENT_WINDOW_MS }
+}
+
+// --- Send pacer ----------------------------------------------------------
+//
+// Sleeps before each call so consecutive sends are at least `delayMs` apart.
+// WhatsApp flags accounts that burst then idle as automated, so we smooth the
+// stream. Unlike the rate limiter, this is purely advisory — it never blocks,
+// it just spaces calls in time. `createPacer` is pure (no env reads) so it's
+// unit-testable; the singleton below binds it to env config.
+export type Pacer = {
+  pace<T>(fn: () => Promise<T>): Promise<T>
+}
+
+export function createPacer(delayMs: number): Pacer {
+  let lastCall = Date.now()
+  return {
+    async pace<T>(fn: () => Promise<T>): Promise<T> {
+      const elapsed = Date.now() - lastCall
+      const delay = Math.max(0, delayMs - elapsed)
+      if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay))
+      lastCall = Date.now()
+      return fn()
+    },
   }
 }
 
-const MIN_ACTION_GAP_MS = intEnvNonNeg("WHATSAPP_MIN_ACTION_GAP_MS", 1000)
-
-export function actionGapMs() {
-  return MIN_ACTION_GAP_MS
-}
-export const pace = createPacer(MIN_ACTION_GAP_MS)
+export const sendPacer = createPacer(PACER_DELAY_MS)

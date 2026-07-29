@@ -10,12 +10,17 @@ Everything the installer sets up, and why it's shaped this way.
 ├── mcp-whatsapp/           # the server (copied from templates/)
 │   ├── index.ts            # entry: brings up MCP transport, then WhatsApp in the background
 │   ├── store.ts            # Baileys socket, auth, QR, reconnection with backoff
-│   ├── messages.ts         # live in-memory ingestion (raw buffer for action tools)
+│   ├── messages.ts         # live in-memory ingestion + delivery status tracking
 │   ├── historyStore.ts     # persistent, searchable message log (JSON)
-│   ├── tools.ts            # the MCP tools + policy enforcement
+│   ├── tools.ts            # the MCP tools + policy enforcement (~45 tools)
 │   ├── resources.ts        # read-only MCP resources (connection, chats, history)
-│   ├── policy.ts           # recipient allowlist + send rate limiter
-│   ├── utils.ts            # pure helpers (JID parsing, path sandbox)
+│   ├── policy.ts           # recipient allowlist, send rate limiter, per-recipient cap, global pacer
+│   ├── logger.ts           # pino-based structured logging to file
+│   ├── diagnostics.ts      # Baileys disconnect codes → human-readable diagnostics
+│   ├── errorDecoder.ts     # send errors → actionable messages
+│   ├── formatter.ts        # WhatsApp text formatting (<think> strip, markdown, chunking)
+│   ├── stats.ts            # in-process runtime counters (delivery rate, top recipients)
+│   ├── utils.ts            # pure helpers (JID parsing, path sandbox, vCard)
 │   ├── *.test.ts           # unit tests (run with `npm test`)
 │   └── package.json
 ├── whatsapp/               # created at first run — session creds + qr.png (git-ignored)

@@ -1,20 +1,21 @@
 # mcp-whatsapp
 
 A local [OpenCode](https://opencode.ai) / MCP server that links a WhatsApp
-account (via [Baileys](https://github.com/WhiskeySockets/Baileys)) and exposes 41
-Baileys-flavored tools across: **messaging** (`send_message`, `send_media`,
+account (via [Baileys](https://github.com/WhiskeySockets/Baileys)) and exposes
+~45 Baileys-flavored tools across: **messaging** (`send_message`, `send_media`,
 `send_reaction`, `edit_message`, `delete_message`, `send_location`,
-`send_contact`, `send_poll`), **history** (`load_messages`, `search_messages`,
-`chats`, `contacts`, `messages_upsert`, `fetch_message_history`), **groups**
-(`group_create`, `group_participants_update`, `group_update`,
-`group_setting_update`, `group_invite`, `group_accept_invite`,
+`send_contact`, `send_poll`, `message_status`), **history** (`load_messages`,
+`search_messages`, `chats`, `contacts`, `messages_upsert`,
+`fetch_message_history`), **groups** (`group_create`, `group_participants_update`,
+`group_update`, `group_setting_update`, `group_invite`, `group_accept_invite`,
 `group_get_invite_info`, `group_metadata`, `group_fetch_all_participating`,
 `group_leave`), **contacts/discovery** (`on_whatsapp`, `update_block_status`,
 `fetch_blocklist`, `get_business_profile`, `fetch_status`, `profile_picture_url`,
-`presence_subscribe`), **chat/profile** (`chat_modify`, `star_message`,
-`read_messages`, `send_presence_update`, `download_media_message`,
-`update_profile`, `update_profile_picture`), and **connection** (`login_qr`,
-`relink`, `connection_state`).
+`presence_subscribe`, `resolve_lid`, `resolve_pn`), **chat/profile**
+(`chat_modify`, `star_message`, `read_messages`, `send_presence_update`,
+`download_media_message`, `update_profile`, `update_profile_picture`),
+**formatting** (`format_text`), and **connection** (`login_qr`, `relink`,
+`connection_state`).
 
 This folder is installed by
 [`opencode-mcp-whatsapp`](https://github.com/ahmadmcer/opencode-mcp-whatsapp).

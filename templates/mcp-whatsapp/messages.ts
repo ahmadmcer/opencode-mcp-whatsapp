@@ -40,6 +40,9 @@ export type ResolvedMessage = {
   mediaType?: MediaType
 }
 
+import { logger } from "./logger.js"
+import { recordDeliveryTransition } from "./stats.js"
+
 const MAX_RECENT = 200
 const MAX_CHATS = 200
 const MAX_RAW = 200
@@ -50,6 +53,12 @@ const chatMap = new Map<string, ChatEntry>()
 // long after it scrolled out of the rendered `recent` list. Insertion-ordered, so
 // the first key is always the oldest — cheap FIFO eviction.
 const rawById = new Map<string, any>()
+// Latest known delivery status per outgoing message id, so the agent can ask
+// whether a send actually reached the recipient. WhatsApp status codes:
+//   0=ERROR, 1=PENDING, 2=SERVER_ACK, 3=DELIVERY_ACK, 4=READ, 5=PLAYED.
+// Bounded so a long-running session can't grow without limit; oldest evicted.
+const MAX_STATUS = 500
+const statusById = new Map<string, number>()
 
 // Detects a media message with no text body and returns its type + a display
 // placeholder, so images/videos/etc. are no longer dropped for lacking a caption.
@@ -168,6 +177,10 @@ export function recordOutgoing(sent: any, summary: string, mediaType?: MediaType
   if (recent.length > MAX_RECENT) recent.shift()
   rememberRaw(id, sent)
   toHistory(rec)
+  // Bump the per-recipient counter so `connection_state` can rank who's
+  // been chatted with most. Counter lives in stats.ts so the module-level
+  // singleton stays un-imported-cyclic.
+  void import("./stats.js").then(({ recordSend }) => recordSend(jid))
 }
 
 // Bound chatMap so a long-lived session that touches many chats can't grow
@@ -214,4 +227,85 @@ export function getMessageById(id: string): ResolvedMessage | null {
     chatJid: raw.key?.remoteJid ?? entry?.chatJid ?? "unknown",
     mediaType: entry?.mediaType,
   }
+}
+
+/**
+ * Look up a LID that we've already passively observed for a phone number.
+ * Baileys does NOT publish `remoteJid` as a LID for plain 1:1 chats, but it
+ * DOES publish `remoteJid` (or `remoteJidAlternate` / `participant`) as the
+ * LID for groups, channels, and certain device-tied messages. When you've
+ * received a message *from* the contact in a group context, the LID-PN
+ * mapping is cached here.
+ *
+ * Returns the LID JID (`…@lid`) or null if no cached mapping exists.
+ */
+export function getCachedLidForPn(pn: string): string | null {
+  const digits = pn.replace(/\D/g, "")
+  for (const raw of rawById.values()) {
+    const key = raw?.key
+    if (!key) continue
+    const candidates = [key.remoteJid, key.participant, key.remoteJidAlternate].filter(Boolean) as string[]
+    for (const jid of candidates) {
+      if (!jid.endsWith("@lid")) continue
+      const local = jid.split("@")[0].split(":")[0]
+      // Heuristic: if the LID-local is a phone-like number that matches the
+      // PN's last 7-12 digits, it's almost certainly the same user. A real
+      // LID is opaque; the only stable signal is "this conversation worked",
+      // so we accept either an exact suffix match or a shared trailing 9
+      // digits (WhatsApp LIDs in our observation are the same PN but with a
+      // trailing check digit difference).
+      if (local === digits || (local.length >= 9 && digits.endsWith(local.slice(-9)))) {
+        return jid
+      }
+    }
+  }
+  return null
+}
+
+// Status code labels for the `message_status` tool and the logger.
+const STATUS_NAMES: Record<number, string> = {
+  0: "ERROR",
+  1: "PENDING",
+  2: "SERVER_ACK",
+  3: "DELIVERY_ACK",
+  4: "READ",
+  5: "PLAYED",
+}
+
+/**
+ * Subscribe to Baileys `messages.update` events. Each entry carries a key +
+ * an `update` patch; we only care about `update.status` changes (delivery
+ * state for our own sends and read-receipts for inbound). Anything else
+ * (poll votes, reactions) is ignored here.
+ *
+ * Surface ERRORs to STDERR so the user sees them in the OpenCode TUI — the
+ * `send_message` tool resolves on enqueue and never fails on server-side
+ * delivery rejection, so this is the only visibility we get.
+ */
+export function handleMessageUpdate(updates: any[]) {
+  for (const u of updates ?? []) {
+    const id = u?.key?.id
+    if (!id) continue
+    const status = typeof u?.update?.status === "number" ? u.update.status : null
+    if (status == null) continue
+    statusById.set(id, status)
+    if (statusById.size > MAX_STATUS) {
+      const oldest = statusById.keys().next().value
+      if (oldest !== undefined) statusById.delete(oldest)
+    }
+    if (status === 0) {
+      const jid = u.key.remoteJid ?? "?"
+      logger.warn({ messageId: id, jid, update: u.update }, `delivery ERROR for ${id} → ${jid}`)
+    }
+    // Track the highest status we've seen for stats — moved to its own
+    // helper so `connection_state` can show delivery-rate at a glance.
+    recordDeliveryTransition(id, status)
+  }
+}
+
+/** Latest known delivery status for a message id, or null if never seen. */
+export function getMessageStatus(id: string): { code: number; name: string } | null {
+  const code = statusById.get(id)
+  if (code == null) return null
+  return { code, name: STATUS_NAMES[code] ?? `UNKNOWN(${code})` }
 }

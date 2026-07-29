@@ -10,9 +10,10 @@ import makeWASocket, {
 } from "@whiskeysockets/baileys"
 import QRCode from "qrcode"
 import NodeCache from "node-cache"
-import { handleUpsert, extractMessage, getRawMessageById } from "./messages.js"
+import { handleUpsert, handleMessageUpdate, extractMessage, getRawMessageById } from "./messages.js"
+import { logger } from "./logger.js"
+import { getDiagnostic } from "./diagnostics.js"
 import { recordMany as recordHistoryMany, upsertContact, setChatName } from "./historyStore.js"
-import { pace } from "./policy.js"
 
 type WASocket = ReturnType<typeof makeWASocket>
 
@@ -58,7 +59,6 @@ const logger: any = {
 }
 
 let sock: WASocket | null = null
-let pacedSock: WASocket | null = null
 let connected = false
 let meJid: string | null = null
 let lastError: string | null = null
@@ -68,40 +68,8 @@ let reconnecting = false
 let steppedAside = false
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
-// Socket methods that hit WhatsApp's servers. Calls to these (via the tools layer)
-// are spaced out by the global pacer so bursts don't look automated. Read-only
-// local tools don't touch the socket and aren't affected.
-const PACED_METHODS = new Set([
-  "sendMessage", "readMessages", "sendPresenceUpdate", "presenceSubscribe",
-  "onWhatsApp", "fetchStatus", "getBusinessProfile", "updateBlockStatus", "fetchBlocklist",
-  "profilePictureUrl", "groupMetadata", "groupCreate", "groupParticipantsUpdate",
-  "groupUpdateSubject", "groupUpdateDescription", "groupSettingUpdate", "groupInviteCode",
-  "groupRevokeInvite", "groupAcceptInvite", "groupGetInviteInfo", "groupLeave",
-  "groupFetchAllParticipating", "chatModify", "updateProfileName", "updateProfileStatus",
-  "updateProfilePicture", "removeProfilePicture", "fetchMessageHistory", "updateMediaMessage",
-])
-
-// Wrap the socket so every network method awaits the pacer first. Non-network
-// members pass through (bound to the real socket). Only the tools layer sees this
-// wrapper; store-internal code uses the raw `sock`, so event handlers never block.
-function wrapPaced(s: WASocket): WASocket {
-  return new Proxy(s, {
-    get(target, prop, receiver) {
-      const val = Reflect.get(target, prop, receiver)
-      if (typeof val !== "function") return val
-      if (PACED_METHODS.has(prop as string)) {
-        return async (...args: any[]) => {
-          await pace()
-          return (val as (...a: any[]) => any).apply(target, args)
-        }
-      }
-      return (val as (...a: any[]) => any).bind(target)
-    },
-  }) as WASocket
-}
-
 export function getSocket(): WASocket | null {
-  return pacedSock
+  return sock
 }
 export function isConnected() {
   return connected
@@ -135,8 +103,8 @@ export function getLogger() {
   return logger
 }
 
-function log(msg: string) {
-  console.error(`[whatsapp] ${msg}`)
+function log(msg: string, meta?: Record<string, unknown>) {
+  logger.info({ ...meta }, msg)
 }
 
 function scheduleReconnect() {
@@ -191,7 +159,6 @@ export async function forceRelink(wipe: boolean): Promise<void> {
       ;(sock as any).end?.(undefined)
     } catch {}
     sock = null
-    pacedSock = null
   }
   connected = false
   meJid = null
@@ -251,12 +218,15 @@ export async function initConnection() {
     // in-memory raw buffer in messages.ts.
     getMessage: async (key: any) => getRawMessageById(key?.id)?.message ?? undefined,
   })
-  pacedSock = wrapPaced(sock)
 
   sock.ev.on("creds.update", saveCreds)
   // Attached here (not lazily in the tools layer) so it re-binds on every
   // reconnect and never misses messages that arrive before a tool is first called.
   sock.ev.on("messages.upsert", handleUpsert)
+  // Track delivery status for our own sends (ERROR / SERVER_ACK / DELIVERY_ACK /
+  // READ). Without this, send_message only sees "enqueued" — server-side
+  // delivery rejection would be invisible.
+  sock.ev.on("messages.update", handleMessageUpdate)
 
   // History sync: WhatsApp sends past chats/contacts/messages after linking.
   // Ingest them into the persistent, searchable history store.
@@ -328,11 +298,13 @@ export async function initConnection() {
       connected = false
       meJid = null
       const code = (lastDisconnect?.error as any)?.output?.statusCode
+      const diag = getDiagnostic(code)
       if (code === DisconnectReason.loggedOut) {
         // Terminal: creds are dead. Reconnecting with them would loop forever —
         // stop, and let the user re-link in-process via the `relink` tool (which
         // wipes the session and generates a fresh QR without an OpenCode restart).
-        lastError = "Logged out by WhatsApp. Run the relink tool (wipe: true) to clear the stale session and get a fresh QR — no OpenCode restart needed."
+        lastError = `Logged out by WhatsApp. ${diag.hint}`
+        logger.warn({ code, reason: diag.reason }, diag.description)
         log(lastError)
         return
       }
@@ -344,15 +316,20 @@ export async function initConnection() {
         // QR. Step aside instead: the newest session owns the link. Restart this
         // one to reclaim it deliberately.
         steppedAside = true
-        lastError =
-          "Another OpenCode session or linked device took over this WhatsApp connection. " +
-          "This instance stepped aside to avoid a reconnect loop (which is what used to force a re-scan). " +
-          "Restart this session if you want it to reclaim the link."
+        lastError = `Another OpenCode session or linked device took over this WhatsApp connection. ${diag.description} This instance stepped aside to avoid a reconnect loop. Restart this session if you want it to reclaim the link.`
+        logger.warn({ code, reason: diag.reason }, "connection replaced — stepping aside")
         log(lastError)
         return
       }
-      const reasonName = (code != null && DisconnectReason[code]) || code || "unknown"
-      log(`connection closed (${reasonName}) — will reconnect`)
+      // Generic close path — log structured diagnostic, fall back to the
+      // existing auto-reconnect scheduler.
+      logger.warn(
+        { code, reason: diag.reason, recoverable: diag.recoverable },
+        `${diag.description} — ${diag.recoverable ? "will reconnect" : "user action required"}`,
+      )
+      if (!diag.recoverable && !lastError) {
+        lastError = `${diag.description} ${diag.hint}`
+      }
       scheduleReconnect()
     }
   })

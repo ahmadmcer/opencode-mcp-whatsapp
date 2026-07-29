@@ -20,7 +20,7 @@ import {
   cacheGroupMetadata,
   isSyncFullHistory,
 } from "./store.js"
-import { getRecent, getMessageById, recordOutgoing, type ResolvedMessage } from "./messages.js"
+import { getRecent, getMessageById, getCachedLidForPn, recordOutgoing, getMessageStatus, type ResolvedMessage } from "./messages.js"
 import {
   getChatMessages,
   searchMessages as searchHistory,
@@ -30,7 +30,10 @@ import {
   stats as historyStats,
 } from "./historyStore.js"
 import { toJid, filenameOf, resolveWithinRoots, isInside, buildVcard } from "./utils.js"
-import { isRecipientAllowed, allowedRecipients, sendLimiter, rateLimitConfig, actionGapMs } from "./policy.js"
+import { isRecipientAllowed, allowedRecipients, sendLimiter, rateLimitConfig, sendPacer, pacerConfig, checkRecipientLimit, recipientLimitConfig } from "./policy.js"
+import { getStats } from "./stats.js"
+import { formatWhatsAppText, chunkMessage, splitBubbles } from "./formatter.js"
+import { decodeSendError, formatDecodedError } from "./errorDecoder.js"
 
 // Directories `send_media` may read from and `download_media_message` may write to.
 // Defaults to the user's Downloads and a dedicated outbox; override with
@@ -100,10 +103,23 @@ function rateLimited() {
   )
 }
 
-// Full guard for outbound, message-producing tools: allowlist then rate limit.
-// Returns an error result to short-circuit on, or null to proceed.
+// Consumes a per-recipient token; returns an error result if the per-jid
+// limit is hit, else null. Distinct from the global rate limiter so an agent
+// loop replying to one person still trips a separate safety net.
+function recipientRateLimited(jid: string) {
+  const rl = checkRecipientLimit(jid)
+  if (rl.ok) return null
+  const { max, windowMs } = recipientLimitConfig()
+  return errText(
+    `Per-recipient rate limit reached for ${jid} (${max} sends / ${Math.round(windowMs / 1000)}s). ` +
+      `Try again in ${Math.ceil(rl.retryAfterMs / 1000)}s.`,
+  )
+}
+
+// Full guard for outbound, message-producing tools: allowlist → per-recipient
+// rate → global rate. Returns an error result to short-circuit on, or null.
 function sendGuard(jid: string) {
-  return recipientDenied(jid) ?? rateLimited()
+  return recipientDenied(jid) ?? recipientRateLimited(jid) ?? rateLimited()
 }
 
 // Bare phone/user part of a JID, ignoring the device suffix (…:NN) and domain,
@@ -168,12 +184,19 @@ export function registerTools(server: McpServer) {
       }
       const guard = sendGuard(jid)
       if (guard) return guard
+      // Opt-in auto-format: strip <think> / [fact:...] etc when the agent is
+      // passing raw model output directly. Default off so existing callers
+      // are not surprised by text changes.
+      const finalMessage =
+        process.env.WHATSAPP_AUTO_FORMAT === "true" ? formatWhatsAppText(message) : message
       try {
-        const sent = await s.sendMessage(jid, { text: message }, quoted ? { quoted } : undefined)
-        recordOutgoing(sent, message)
+        const sent = await sendPacer.pace(() =>
+          s.sendMessage(jid, { text: finalMessage }, quoted ? { quoted } : undefined),
+        )
+        recordOutgoing(sent, finalMessage)
         return okText(`Sent to ${jid} (id: ${sent?.key?.id ?? "?"})`)
       } catch (e) {
-        return errText(`Send failed: ${(e as Error).message}`)
+        return errText(formatDecodedError(decodeSendError(e, { jid })))
       }
     },
   )
@@ -239,11 +262,13 @@ export function registerTools(server: McpServer) {
       const guard = sendGuard(jid)
       if (guard) return guard
       try {
-        const sent = await s.sendMessage(jid, content as any, quoted ? { quoted } : undefined)
+        const sent = await sendPacer.pace(() =>
+          s.sendMessage(jid, content as any, quoted ? { quoted } : undefined),
+        )
         recordOutgoing(sent, `[${mediaType}] ${name}`, mediaType)
         return okText(`Sent ${safePath} to ${jid} (id: ${sent?.key?.id ?? "?"})`)
       } catch (e) {
-        return errText(`Send failed: ${(e as Error).message}`)
+        return errText(formatDecodedError(decodeSendError(e, { jid })))
       }
     },
   )
@@ -329,6 +354,60 @@ export function registerTools(server: McpServer) {
       } catch (e) {
         return errText(`Delete failed: ${(e as Error).message}`)
       }
+    },
+  )
+
+  // --- message_status -----------------------------------------------------
+  server.registerTool(
+    "message_status",
+    {
+      title: "Check delivery status of a sent message",
+      description:
+        "Return the latest known delivery status for a message id (from send_message / send_media / send_poll). WhatsApp status codes: 0=ERROR, 1=PENDING, 2=SERVER_ACK, 3=DELIVERY_ACK (delivered to recipient), 4=READ, 5=PLAYED. Returns 'unknown' if the message id has never been seen via messages.update — common for messages still in the queue or for sends that have not produced a server ack yet.",
+      inputSchema: {
+        message_id: z.string(),
+      },
+    },
+    async ({ message_id }) => {
+      const s = getSocket()
+      const st = getMessageStatus(message_id)
+      if (st) return okText(`${message_id}: ${st.name} (${st.code})`)
+      return okText(`${message_id}: unknown (no messages.update received yet)`)
+    },
+  )
+
+  // --- format_text --------------------------------------------------------
+  // Pure formatter exposed as a tool so an agent can pre-clean raw LLM output
+  // before calling send_message. Also runs the `chunkMessage` and `splitBubbles`
+  // helpers so the agent can see how the text would split into WhatsApp bubbles.
+  server.registerTool(
+    "format_text",
+    {
+      title: "Format text for WhatsApp",
+      description:
+        "Strip LLM noise (<think>, [fact:...], code blocks), normalise Markdown (**bold** → *bold*, drop # headings), and report how the cleaned text would chunk into ≤ max_len-character bubbles. Useful before send_message when the source is a raw model response.",
+      inputSchema: {
+        text: z.string(),
+        max_len: z.number().int().min(100).max(65536).optional(),
+      },
+    },
+    async ({ text, max_len = 4096 }) => {
+      const cleaned = formatWhatsAppText(text)
+      const bubbles = splitBubbles(cleaned)
+      const chunks = chunkMessage(cleaned, max_len)
+      const lines: string[] = []
+      lines.push(`[cleaned] (${cleaned.length} chars)`)
+      lines.push(cleaned)
+      if (bubbles.length > 1) {
+        lines.push("")
+        lines.push(`[bubbles: ${bubbles.length}]`)
+        for (const [i, b] of bubbles.entries()) lines.push(`  ${i + 1}. ${b.slice(0, 80)}${b.length > 80 ? "…" : ""}`)
+      }
+      if (chunks.length > 1) {
+        lines.push("")
+        lines.push(`[chunks at max_len=${max_len}: ${chunks.length}]`)
+      }
+      return okText(lines.join("\n"))
     },
   )
 
@@ -418,13 +497,15 @@ export function registerTools(server: McpServer) {
       const guard = sendGuard(jid)
       if (guard) return guard
       try {
-        const sent = await s.sendMessage(jid, {
-          location: { degreesLatitude: latitude, degreesLongitude: longitude, name, address },
-        })
+        const sent = await sendPacer.pace(() =>
+          s.sendMessage(jid, {
+            location: { degreesLatitude: latitude, degreesLongitude: longitude, name, address },
+          }),
+        )
         recordOutgoing(sent, `[location] ${latitude},${longitude}`)
         return okText(`Location sent to ${jid} (id: ${sent?.key?.id ?? "?"})`)
       } catch (e) {
-        return errText(`Send failed: ${(e as Error).message}`)
+        return errText(formatDecodedError(decodeSendError(e, { jid })))
       }
     },
   )
@@ -456,13 +537,15 @@ export function registerTools(server: McpServer) {
       const guard = sendGuard(jid)
       if (guard) return guard
       try {
-        const sent = await s.sendMessage(jid, {
-          contacts: { displayName: contact_name, contacts: [{ vcard }] },
-        })
+        const sent = await sendPacer.pace(() =>
+          s.sendMessage(jid, {
+            contacts: { displayName: contact_name, contacts: [{ vcard }] },
+          }),
+        )
         recordOutgoing(sent, `[contact] ${contact_name}`)
         return okText(`Contact sent to ${jid} (id: ${sent?.key?.id ?? "?"})`)
       } catch (e) {
-        return errText(`Send failed: ${(e as Error).message}`)
+        return errText(formatDecodedError(decodeSendError(e, { jid })))
       }
     },
   )
@@ -494,11 +577,13 @@ export function registerTools(server: McpServer) {
       if (guard) return guard
       const selectableCount = Math.min(selectable_count ?? 1, options.length)
       try {
-        const sent = await s.sendMessage(jid, { poll: { name, values: options, selectableCount } })
+        const sent = await sendPacer.pace(() =>
+          s.sendMessage(jid, { poll: { name, values: options, selectableCount } }),
+        )
         recordOutgoing(sent, `[poll] ${name}`)
         return okText(`Poll sent to ${jid} (id: ${sent?.key?.id ?? "?"})`)
       } catch (e) {
-        return errText(`Send failed: ${(e as Error).message}`)
+        return errText(formatDecodedError(decodeSendError(e, { jid })))
       }
     },
   )
@@ -724,9 +809,28 @@ export function registerTools(server: McpServer) {
         `Send roots: ${SEND_ROOTS.join(", ")}`,
         `Allowed recipients: ${allowedRecipients()?.join(", ") ?? "all (WHATSAPP_ALLOWED_RECIPIENTS unset)"}`,
         `Send rate limit: ${rateLimitConfig().max} per ${Math.round(rateLimitConfig().windowMs / 1000)}s`,
-        `Action pacing: ${actionGapMs() > 0 ? `min ${actionGapMs()}ms between operations` : "disabled"}`,
+        `Send pacer: ${pacerConfig().delayMs}ms minimum gap between outbound sends`,
         `History sync: ${isSyncFullHistory() ? "full" : "recent only"} — stored ${historyStats().messages} messages across ${historyStats().chats} chats`,
       ]
+      // Runtime stats (uptime, memory, delivery counters)
+      const st = getStats()
+      lines.push(`Uptime: ${st.uptimeFormatted}`)
+      lines.push(`Memory RSS: ${st.rssMb}MB`)
+      const buckets = st.buckets
+      const successful = buckets.delivered + buckets.read + buckets.played
+      const pct = st.messagesSent > 0 ? ((successful / st.messagesSent) * 100).toFixed(1) : "n/a"
+      lines.push(
+        `Outbound: ${st.messagesSent} sent · delivered+read ${successful} (${pct}%) · errored ${buckets.error} · pending ${buckets.pending}`,
+      )
+      if (st.topRecipients.length > 0) {
+        lines.push(
+          `Top recipients: ${st.topRecipients.map((r) => `${r.jid.replace(/@.*/, "")} (${r.count})`).join(", ")}`,
+        )
+      }
+      if (st.lastErrorAt) {
+        const ageMin = Math.round((st.lastErrorAgeMs ?? 0) / 60000)
+        lines.push(`Last delivery error: ${ageMin}m ago`)
+      }
       if (getLastError()) lines.push(`Last error: ${getLastError()}`)
       if (!isConnected()) {
         lines.push("")
@@ -825,7 +929,14 @@ export function registerTools(server: McpServer) {
       }
       return okText(
         items
-          .map((m) => `[id:${m.id}] [${new Date(m.ts * 1000).toISOString()}] ${m.fromMe ? "me" : m.fromName ?? m.from}: ${m.body}`)
+          .map((m) => {
+            const base = `[id:${m.id}] [${new Date(m.ts * 1000).toISOString()}] ${m.fromMe ? "me" : m.fromName ?? m.from}: ${m.body}`
+            if (!m.fromMe) return base
+            // Surface delivery status for our own sends so we can see
+            // whether the recipient actually got the message.
+            const st = getMessageStatus(m.id)
+            return st ? `${base}  [${st.name}]` : `${base}  [status: unknown]`
+          })
           .join("\n"),
       )
     },
@@ -1155,6 +1266,152 @@ export function registerTools(server: McpServer) {
     },
   )
 
+  // --- resolve_lid --------------------------------------------------------
+// WhatsApp issues every user both a phone-JID (`1234567890@s.whatsapp.net`)
+// and a LID (`123@lid`). Most outbound sends work fine with the phone JID,
+// but group interactions, channel posts, and certain Business API hooks
+// require the LID. This tool uses Baileys' USync LID protocol to query
+// WhatsApp's mapping service and return the LID for a phone number.
+//
+// Note: the LID-to-PN mapping is also populated passively as messages flow
+// in. So the answer may already be cached locally if you've received a
+// message from that contact before, in which case the round-trip is free.
+server.registerTool(
+    "resolve_lid",
+    {
+      title: "Resolve a phone number to its WhatsApp LID",
+      description:
+        "Look up the WhatsApp LID (`…@lid`) for one or more phone numbers. Uses Baileys' USync LID protocol. Useful when you need the LID for group APIs or channel posts. Pass numbers in international format (e.g. +62… or 62…).",
+      inputSchema: {
+        numbers: z.array(z.string()).min(1).max(20),
+      },
+    },
+    async ({ numbers }) => {
+      const s = getSocket()
+      if (!s || !isConnected()) return notConnected()
+      try {
+        // Dynamic import so tests that don't touch Baileys can mock or skip.
+        const { USyncQuery, USyncUser } = await import("@whiskeysockets/baileys")
+        const normalised = numbers.map((n) => n.replace(/\D/g, ""))
+        // USync needs the user to be one-per-instance; withUser accepts a
+        // single USyncUser, so build one query per number and merge the lists.
+        // We send both LID + Contact protocols so the response is useful even
+        // when the LID protocol returns nothing (which is common for users
+        // who haven't messaged this account yet, or who have LID visibility
+        // privacy turned on).
+        const query = new USyncQuery().withLIDProtocol().withContactProtocol().withMode("query")
+        for (const p of normalised) query.withUser(new USyncUser().withPhone(p))
+        const result = await s.executeUSyncQuery(query)
+        const lines: string[] = []
+        const list = result?.list ?? []
+        for (const phone of normalised) {
+          const entry = list.find(
+            (e) => e.id === phone || `${e.id}@s.whatsapp.net` === `${phone}@s.whatsapp.net`,
+          )
+          // The LID can land in either `entry.lid` (parsed from USyncLIDProtocol)
+          // or as a nested `lid` field with `{id: "..."}`. Cover both.
+          const lidRaw = (entry as any)?.lid
+          const lid: string | undefined = typeof lidRaw === "string" ? lidRaw : lidRaw?.id
+          if (lid) {
+            lines.push(`${phone}: LID = ${lid}@lid`)
+          } else if (entry) {
+            lines.push(`${phone}: on WhatsApp (no LID returned — privacy-restricted or legacy account)`)
+          } else {
+            // Server didn't include them in the LID response. Fall back to
+            // the local cache: if we've ever received a message *from* this
+            // contact in a group/channel context, Baileys has populated the
+            // LID mapping passively and we can answer without a round-trip.
+            const cached = getCachedLidForPn(phone)
+            if (cached) {
+              lines.push(`${phone}: LID = ${cached} (from local message cache)`)
+            } else {
+              lines.push(
+                `${phone}: not on WhatsApp or no result. The LID mapping is only populated after you receive a message from this contact in a group or channel — try chatting with them once first.`,
+              )
+            }
+          }
+        }
+        return okText(lines.join("\n"))
+      } catch (e) {
+        return errText(`LID resolution failed: ${(e as Error).message}`)
+      }
+    },
+  )
+
+  // --- resolve_pn ---------------------------------------------------------
+  // Reverse direction: given one or more LIDs, return the corresponding phone
+  // numbers. Useful when you have a group's participant list (almost always
+  // LIDs in modern WhatsApp) and need to find out which phone number is
+  // behind a given LID so you can reach them via 1:1 chat or correlate with
+  // an external contact list.
+  server.registerTool(
+    "resolve_pn",
+    {
+      title: "Resolve WhatsApp LIDs to phone numbers",
+      description:
+        "Look up the phone numbers behind one or more WhatsApp LIDs (`…@lid`). Uses Baileys' USync LID protocol in reverse. Useful when you have a group participant list (which is LID-based) and need to know who's who.",
+      inputSchema: {
+        lids: z.array(z.string()).min(1).max(20),
+      },
+    },
+    async ({ lids }) => {
+      const s = getSocket()
+      if (!s || !isConnected()) return notConnected()
+      try {
+        // Strip @lid suffix to get the bare LID number for matching.
+        const normalised = lids.map((l) => l.split("@")[0])
+        const lines: string[] = []
+
+        // 1) Check Baileys' internal Signal-protocol LID mapping cache. This
+        //    is populated passively as messages flow in (group participants
+        //    get LID-PN mappings written to the auth state whenever a
+        //    message is received). It's free — no network round-trip.
+        const sAny = s as any
+        const lidMapping = sAny?.signalRepository?.lidMapping
+        if (lidMapping) {
+          for (const lid of normalised) {
+            try {
+              const pn = await lidMapping.getPNForLID(`${lid}@lid`)
+              if (pn) {
+                lines.push(`${lid}@lid → phone: ${pn}`)
+                continue
+              }
+            } catch {
+              // fall through to USync
+            }
+          }
+        }
+        // If every LID resolved from the cache, we're done.
+        if (lines.length === normalised.length) return okText(lines.join("\n"))
+
+        // 2) Fall back to USync for the unresolved LIDs.
+        const unresolved = normalised.filter((l) => !lines.some((ln) => ln.startsWith(l)))
+        const { USyncQuery, USyncUser } = await import("@whiskeysockets/baileys")
+        const query = new USyncQuery().withLIDProtocol().withMode("query")
+        for (const l of unresolved) query.withUser(new USyncUser().withLid(l))
+        const result = await s.executeUSyncQuery(query)
+        const list = result?.list ?? []
+        for (const lid of unresolved) {
+          const entry = list.find((e) => e.id === lid || `${e.id}@lid` === `${lid}@lid`)
+          const phone = (entry as any)?.phone
+          if (phone && typeof phone === "string") {
+            lines.push(`${lid}@lid → phone: ${phone}`)
+          } else if (phone?.number) {
+            lines.push(`${lid}@lid → phone: ${phone.number}`)
+          } else if (entry?.id && entry.id !== lid && !entry.id.endsWith("@lid")) {
+            lines.push(`${lid}@lid → phone: ${entry.id}`)
+          } else {
+            lines.push(`${lid}@lid → phone not returned (privacy-restricted or never messaged)`)
+          }
+        }
+        return okText(lines.join("\n"))
+      } catch (e) {
+        return errText(`PN resolution failed: ${(e as Error).message}`)
+      }
+    },
+  )
+
+  // --- update_block_status -----------------------------------------------
   server.registerTool(
     "update_block_status",
     {
